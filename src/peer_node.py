@@ -7,7 +7,7 @@ import sys
 from crypto_utils import verify_signature, sign_data, generate_key_pair, serialize_public_key
 
 # Configuração do Discovery
-DISCOVERY_IP = '127.0.0.1'
+DISCOVERY_IP = '192.168.1.216'
 DISCOVERY_PORT = 5000
 
 class PeerNode:
