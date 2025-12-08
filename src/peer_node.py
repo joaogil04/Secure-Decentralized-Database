@@ -6,24 +6,23 @@ import sys
 # Certifica-te que tens o crypto_utils.py na mesma pasta
 from crypto_utils import verify_signature, sign_data, generate_key_pair, serialize_public_key
 
-# Configuração do Discovery
-DISCOVERY_IP = ''
-DISCOVERY_PORT = 5000
-
 class PeerNode:
-    def __init__(self, host, port, my_id):
+    # 1. CORREÇÃO: Receber e guardar o discovery_ip e port logo no início
+    def __init__(self, host, port, my_id, discovery_ip, discovery_port):
         self.host = host
         self.port = port
         self.my_id = my_id
+        self.discovery_ip = discovery_ip     # Guardar na classe
+        self.discovery_port = discovery_port # Guardar na classe
         self.storage = {} 
         self.sse_index = {}
         
-        # Gerar chaves RSA ao iniciar
         print(f"[{my_id}] A gerar chaves de encriptação...")
         self.private_key, self.public_key = generate_key_pair()
         self.pub_key_str = serialize_public_key(self.public_key)
 
-    # --- PARTE SERVIDOR (Ouvir outros peers) ---
+    # --- PARTE SERVIDOR ---
+    # 2. CORREÇÃO: start_server não precisa de argumentos, ele só trata de receber conexões
     def start_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -44,7 +43,7 @@ class PeerNode:
             if not data: return
             request = json.loads(data)
 
-            if request['type'] == 'PING':
+            if request.get('type') == 'PING':
                 return
             
             if request['type'] == 'PUT':
@@ -58,7 +57,6 @@ class PeerNode:
 
     def handle_put(self, request, conn):
         print(f"\n[RECEBIDO] PUT de {request.get('sender_id', 'Unknown')}")
-        # 1. Verificar Assinatura (Integridade e Autenticidade)
         valid = verify_signature(
             request['sender_pub_key'], 
             request['encrypted_data'], 
@@ -74,17 +72,18 @@ class PeerNode:
             conn.send(json.dumps({"status": "DENIED"}).encode())
 
     def handle_search(self, request, conn):
-        # (Lógica simples para teste, aqui implementarias o SSE real)
         print(f"\n[RECEBIDO] SEARCH")
         conn.send(json.dumps({"status": "OK", "results": []}).encode())
 
-    # --- PARTE CLIENTE (Falar com Discovery e outros Peers) ---
+    # --- PARTE CLIENTE ---
     
+    # 3. CORREÇÃO: Removemos os argumentos daqui porque usamos self.discovery_ip
     def register_discovery(self):
         """Regista este peer no Discovery Server"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((DISCOVERY_IP, DISCOVERY_PORT))
+            # Usa as variáveis guardadas no __init__
+            s.connect((self.discovery_ip, self.discovery_port))
             msg = {
                 "type": "REGISTER",
                 "peer_id": self.my_id,
@@ -97,11 +96,12 @@ class PeerNode:
         except Exception as e:
             print(f"[ERRO DISCOVERY] Não foi possível conectar: {e}")
 
+    # 4. CORREÇÃO: Removemos os argumentos daqui também
     def get_peers(self):
         """Pede a lista de peers ao Discovery"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((DISCOVERY_IP, DISCOVERY_PORT))
+            s.connect((self.discovery_ip, self.discovery_port))
             msg = {"type": "GET_PEERS", "peer_id": self.my_id}
             s.send(json.dumps(msg).encode())
             resp = json.loads(s.recv(4096).decode())
@@ -111,12 +111,8 @@ class PeerNode:
             return {}
 
     def send_data_to_peer(self, target_ip, target_port, message_text):
-        """Envia um PUT para outro peer"""
         try:
-            # 1. Simular Encriptação (AES seria aqui)
             encrypted_blob = f"ENCRYPTED[{message_text}]" 
-            
-            # 2. Assinar os dados (Integridade)
             signature = sign_data(self.private_key, encrypted_blob)
             
             payload = {
@@ -139,24 +135,27 @@ class PeerNode:
 
 # --- MENU PRINCIPAL ---
 def main():
-    DISCOVERY_IP = input("Insira o IP do Discovery Server (ex:192.168.1.1 ou 127.0.0.1 para simulação local): ")
+    # 5. CORREÇÃO: Pedimos os dados aqui e passamos APENAS para o construtor
+    discovery_ip = input("Insira o IP do Discovery Server (Default: 127.0.0.1): ")
+    if not discovery_ip: discovery_ip = "127.0.0.1"
+    
+    discovery_port = 5000 # Mantemos fixo ou podes pedir input também
 
     my_id = input("Insira o ID do Peer (ex: Alice): ")
     my_port = int(input("Insira a porta do Peer (ex: 6001): "))
     
-    node = PeerNode('0.0.0.0', my_port, my_id)
+    # Passamos tudo para a classe aqui
+    node = PeerNode('0.0.0.0', my_port, my_id, discovery_ip, discovery_port)
     
-    # 1. Iniciar servidor numa thread separada (para não bloquear o menu)
+    # 6. CORREÇÃO: Removemos args daqui. A função start_server já não precisa deles.
     server_thread = threading.Thread(target=node.start_server, daemon=True)
     server_thread.start()
     
-    # Dar tempo ao servidor para arrancar
     time.sleep(1)
     
-    # 2. Registar automaticamente no Discovery
+    # Chamamos as funções sem argumentos (elas usam o self.discovery_ip)
     node.register_discovery()
     
-    # 3. Menu Interativo
     while True:
         print("\n--- MENU ---")
         print("1. Listar Peers (do Discovery)")
@@ -165,7 +164,7 @@ def main():
         choice = input("Escolha: ")
         
         if choice == '1':
-            peers = node.get_peers()
+            peers = node.get_peers() # Já não dá erro de falta de argumentos
             print("Peers Online:", peers)
             
         elif choice == '2':
