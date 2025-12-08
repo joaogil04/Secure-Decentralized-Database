@@ -2,11 +2,43 @@
 import socket
 import threading
 import json
+import time
 
 # Configuração
 HOST = '0.0.0.0'
 PORT = 5000
 active_peers = {} # Formato: {"peer_id": ("ip", port)}
+
+# --- NOVA FUNÇÃO DE HEARTBEAT ---
+def monitor_peers():
+    print("[MONITOR] Sistema de Heartbeat iniciado...")
+    while True:
+        time.sleep(10) # Verifica a cada 10 segundos
+        
+        # Criar uma cópia da lista para não dar erro ao remover itens durante o loop
+        peers_to_check = list(active_peers.items()) 
+        
+        for peer_id, address in peers_to_check:
+            ip, port = address
+            try:
+                # Tenta conectar com um timeout curto (ex: 2 segundos)
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                result = s.connect_ex((ip, int(port)))
+                
+                if result == 0:
+                    # Conexão bem sucedida (Peer está vivo)
+                    # Opcional: Enviar mensagem {"type": "PING"}
+                    s.send(json.dumps({"type": "PING"}).encode())
+                    s.close()
+                else:
+                    raise Exception("Porta fechada")
+            
+            except:
+                print(f"[REMOVIDO] O peer {peer_id} ({ip}:{port}) não responde.")
+                # Remover do dicionário oficial
+                if peer_id in active_peers:
+                    del active_peers[peer_id]
 
 def handle_client(conn, addr):
     print(f"[NOVA CONEXÃO] {addr} conectado.")
@@ -44,6 +76,10 @@ def start():
     server.bind((HOST, PORT))
     server.listen()
     print(f"[DISCOVERY] A escutar em {HOST}:{PORT}")
+
+    monitor_thread = threading.Thread(target=monitor_peers, daemon=True)
+    monitor_thread.start()
+
     while True:
         conn, addr = server.accept()
         thread = threading.Thread(target=handle_client, args=(conn, addr))
