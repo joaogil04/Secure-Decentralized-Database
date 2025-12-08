@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+peer_data/
+storage_*.json  

@@ -5,6 +5,7 @@ import time
 import sys
 # Certifica-te que tens o crypto_utils.py na mesma pasta
 from crypto_utils import verify_signature, sign_data, generate_key_pair, serialize_public_key
+from database import LocalDatabase
 
 class PeerNode:
     # 1. CORREÇÃO: Receber e guardar o discovery_ip e port logo no início
@@ -14,7 +15,7 @@ class PeerNode:
         self.my_id = my_id
         self.discovery_ip = discovery_ip     # Guardar na classe
         self.discovery_port = discovery_port # Guardar na classe
-        self.storage = {} 
+        self.db = LocalDatabase(f"storage_{my_id}.json")
         self.sse_index = {}
         
         print(f"[{my_id}] A gerar chaves de encriptação...")
@@ -64,8 +65,12 @@ class PeerNode:
         )
         
         if valid:
-            self.storage[request['doc_id']] = request['encrypted_data']
-            print(" -> Assinatura VÁLIDA. Dados guardados.")
+            doc_id = request['doc_id']
+            encrypted_data = request['encrypted_data']
+            
+            self.db.put(doc_id, encrypted_data)
+            
+            print(f" -> Guardado no disco: {doc_id}")
             conn.send(json.dumps({"status": "OK"}).encode())
         else:
             print(" -> Assinatura INVÁLIDA. Rejeitado.")
