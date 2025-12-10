@@ -4,7 +4,7 @@ import json
 import time
 import sys
 # Certifica-te que tens o crypto_utils.py na mesma pasta
-from crypto_utils import verify_signature, sign_data, generate_key_pair, serialize_public_key
+from crypto_utils import verify_signature, sign_data, generate_key_pair, serialize_public_key, load_key_from_file, encrypt_data, decrypt_data
 from database import LocalDatabase
 
 class PeerNode:
@@ -15,12 +15,21 @@ class PeerNode:
         self.my_id = my_id
         self.discovery_ip = discovery_ip     # Guardar na classe
         self.discovery_port = discovery_port # Guardar na classe
-        self.db = LocalDatabase(f"storage_{my_id}.json")
+        self.db = LocalDatabase(my_id, folder="peer_data")
         self.sse_index = {}
         
         print(f"[{my_id}] A gerar chaves de encriptação...")
         self.private_key, self.public_key = generate_key_pair()
         self.pub_key_str = serialize_public_key(self.public_key)
+
+        try:
+            # MUDANÇA AQUI: Adicionámos o argumento folder="keys"
+            self.symmetric_key = load_key_from_file("shared_secret.key", folder="keys")
+            print(f"[{my_id}] Chave simétrica carregada de 'keys/'.")
+        except FileNotFoundError:
+            print(f"[{my_id}] ERRO CRÍTICO: 'keys/shared_secret.key' não encontrado!")
+            print("Execute o 'setup_keys.py' primeiro ou copie a chave para a pasta 'keys'.")
+            sys.exit(1)
 
     # --- PARTE SERVIDOR ---
     # 2. CORREÇÃO: start_server não precisa de argumentos, ele só trata de receber conexões
@@ -117,7 +126,10 @@ class PeerNode:
 
     def send_data_to_peer(self, target_ip, target_port, message_text):
         try:
-            encrypted_blob = f"ENCRYPTED[{message_text}]" 
+            encrypted_bytes = encrypt_data(self.symmetric_key, message_text)
+
+            encrypted_blob = encrypted_bytes.decode('utf-8')
+
             signature = sign_data(self.private_key, encrypted_blob)
             
             payload = {
@@ -166,6 +178,7 @@ def main():
         print("1. Listar Peers (do Discovery)")
         print("2. Enviar Dados (PUT)")
         print("3. Sair")
+        print("4. Ver os dados locais")
         choice = input("Escolha: ")
         
         if choice == '1':
@@ -191,6 +204,21 @@ def main():
         elif choice == '3':
             print("A encerrar...")
             sys.exit()
+
+        elif choice == '4':
+            print("\n--- MEUS DADOS LOCAIS ---")
+            # Acede à base de dados interna
+            all_data = node.db.data 
+            if not all_data:
+                print("Base de dados vazia.")
+            else:
+                for doc_id, enc_data in all_data.items():
+                    try:
+                        # Tentar desencriptar para mostrar ao user
+                        plaintext = decrypt_data(node.symmetric_key, enc_data.encode('utf-8'))
+                        print(f"ID: {doc_id} | Conteúdo: {plaintext}")
+                    except Exception as e:
+                        print(f"ID: {doc_id} | ERRO: Não foi possível desencriptar (Chave errada ou dados corrompidos).")
 
 if __name__ == "__main__":
     main()
