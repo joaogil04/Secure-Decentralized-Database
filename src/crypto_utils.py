@@ -105,3 +105,29 @@ def verify_signature(public_key_pem, data, signature_b64):
     except Exception as e:
         print(f"Erro verificação: {e}")
         return False
+    
+def encrypt_rsa(public_key_pem, message_bytes):
+    """Encripta a chave simétrica com a Chave Pública do destino."""
+    public_key = load_public_key(public_key_pem)
+    encrypted = public_key.encrypt(
+        message_bytes,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return base64.b64encode(encrypted).decode('utf-8')
+
+def decrypt_rsa(private_key, encrypted_b64):
+    """Desencripta a chave simétrica com a minha Chave Privada."""
+    encrypted_bytes = base64.b64decode(encrypted_b64)
+    decrypted = private_key.decrypt(
+        encrypted_bytes,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return decrypted # Retorna os bytes da chave simétrica
