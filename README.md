@@ -1,17 +1,17 @@
 # Secure Decentralized Database
 
-[cite_start]Este projeto implementa um sistema de base de dados distribuída (Peer-to-Peer) segura, desenvolvido no âmbito da disciplina de **Data Privacy and Security (DPS)**[cite: 4969].
+Este projeto implementa um sistema de base de dados distribuída (Peer-to-Peer) segura, desenvolvido no âmbito da disciplina de **Data Privacy and Security (DPS)**.
 
 O sistema permite que múltiplos clientes (peers) armazenem e recuperem dados de forma segura, garantindo confidencialidade, integridade, autenticidade e não-repúdio através de esquemas criptográficos híbridos.
 
 ## Funcionalidades
 
-* [cite_start]**Arquitetura P2P:** Comunicação direta entre pares para armazenamento de dados[cite: 4979].
+* **Arquitetura P2P:** Comunicação direta entre pares para armazenamento de dados.
 * **Discovery Server:** Servidor de diretório com *Heartbeat* para monitorização de disponibilidade em tempo real.
 * **Segurança Robusta (Hybrid Encryption):**
     * **Confidencialidade:** Dados encriptados com AES-128 (Fernet).
     * **Partilha Segura:** Chaves simétricas geradas por ficheiro e encapsuladas via RSA-OAEP (Envelope Digital).
-    * [cite_start]**Integridade e Autenticidade:** Assinaturas digitais RSA-PSS em todos os envios[cite: 909].
+    * **Integridade e Autenticidade:** Assinaturas digitais RSA-PSS em todos os envios.
 * **Persistência Local:** Cada peer mantém o seu estado local em ficheiros JSON isolados e protegidos.
 * **Interface Interativa:** Menu CLI para listar peers, enviar dados e desencriptar armazenamento local.
 
@@ -59,10 +59,10 @@ Serve os seguintes inputs quando solicitado:
 
 ## Arquitetura de Segurança
 
-[cite_start]Este projeto segue o paradigma **"Encrypt-then-Sign"** [cite: 800] e utiliza **Encriptação Híbrida (Digital Envelope)** para maximizar a segurança e performance.
+Este projeto segue o paradigma **"Encrypt-then-Sign"** e utiliza **Encriptação Híbrida (Digital Envelope)** para maximizar a segurança e performance.
 
 ### 1. Identidade (RSA)
-[cite_start]No arranque, cada Peer gera um par de chaves RSA 2048-bit[cite: 890].
+No arranque, cada Peer gera um par de chaves RSA 2048-bit.
 * **Chave Privada:** Nunca sai do armazenamento local do Peer (memória/disco).
 * **Chave Pública:** É enviada para o Discovery Server no registo e distribuída aos outros Peers para validação de assinaturas e encriptação de chaves.
 
@@ -77,7 +77,7 @@ Quando a Alice envia um ficheiro para o Bob:
 Para garantir que os dados não foram alterados e vieram mesmo da Alice:
 1.  A Alice calcula o Hash (SHA-256) dos dados encriptados.
 2.  A Alice assina esse hash com a sua **Chave Privada** (RSA-PSS).
-3.  O Bob, ao receber, valida a assinatura usando a **Chave Pública da Alice** (obtida via Discovery). [cite_start]Se a validação falhar, os dados são rejeitados imediatamente[cite: 909].
+3.  O Bob, ao receber, valida a assinatura usando a **Chave Pública da Alice** (obtida via Discovery). Se a validação falhar, os dados são rejeitados imediatamente.
 
 ## Estrutura do Projeto
 
@@ -102,4 +102,6 @@ Para garantir que os dados não foram alterados e vieram mesmo da Alice:
 
 ## Autores
 
-* **João Maria** - *Aluno FCUL*
+* **João Maria** 
+* **Francisco Pechirra**
+* **Raquel Amaral**
