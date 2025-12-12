@@ -10,10 +10,10 @@ O sistema permite que múltiplos clientes (peers) armazenem e recuperem dados de
 * **Discovery Server:** Servidor de diretório com *Heartbeat* para monitorização de disponibilidade em tempo real.
 * **Segurança Robusta (Hybrid Encryption):**
     * **Confidencialidade:** Dados encriptados com AES-128 (Fernet).
-    * **Partilha Segura:** Chaves simétricas geradas por ficheiro e encapsuladas via RSA-OAEP (Envelope Digital).
+    * **Partilha Segura (Multi-Destinatário):** Chaves simétricas geradas por mensagem e encapsuladas via RSA-OAEP (Envelope Digital) para múltiplos destinatários simultâneos.
     * **Integridade e Autenticidade:** Assinaturas digitais RSA-PSS em todos os envios.
-* **Persistência Local:** Cada peer mantém o seu estado local em ficheiros JSON isolados e protegidos.
-* **Interface Interativa:** Menu CLI para listar peers, enviar dados e desencriptar armazenamento local.
+* **Persistência Local:** Cada peer mantém o seu estado local em ficheiros JSON isolados e protegidos (Data at Rest).
+* **Interface Interativa:** Menu CLI para listar peers, enviar dados em broadcast seguro e desencriptar armazenamento local.
 
 ## Pré-requisitos
 
@@ -59,25 +59,25 @@ Serve os seguintes inputs quando solicitado:
 
 ## Arquitetura de Segurança
 
-Este projeto segue o paradigma **"Encrypt-then-Sign"** e utiliza **Encriptação Híbrida (Digital Envelope)** para maximizar a segurança e performance.
+Este projeto segue o paradigma **"Encrypt-then-Sign"** e utiliza **Encriptação Híbrida (Digital Envelope)** para maximizar a segurança e permitir o envio eficiente para múltiplos destinatários.
 
 ### 1. Identidade (RSA)
 No arranque, cada Peer gera um par de chaves RSA 2048-bit.
-* **Chave Privada:** Nunca sai do armazenamento local do Peer (memória/disco).
-* **Chave Pública:** É enviada para o Discovery Server no registo e distribuída aos outros Peers para validação de assinaturas e encriptação de chaves.
+* **Chave Privada:** Mantida em memória/disco local para assinar dados e desencriptar envelopes.
+* **Chave Pública:** Enviada para o Discovery Server no registo e distribuída aos outros Peers para validação de assinaturas e cifragem de chaves.
 
 ### 2. Confidencialidade (AES + RSA)
-Quando a Alice envia um ficheiro para o Bob:
+Quando a Alice envia um ficheiro para a rede (ex: para o Bob e o Charlie):
 1.  Gera-se uma **Chave Simétrica (AES-128)** aleatória e única para aquele envio.
 2.  Os dados são encriptados com essa chave (usando *Fernet*, que inclui HMAC para integridade).
-3.  A chave simétrica é encriptada com a **Chave Pública do Bob** (RSA-OAEP).
-4.  O Bob recebe o "Envelope Digital" e só ele consegue abrir a chave com a sua Chave Privada para ler os dados.
+3.  A chave simétrica é encriptada repetidamente com a **Chave Pública de cada destinatário** (RSA-OAEP).
+4.  O pacote é enviado para a rede. Embora todos recebam o ficheiro, apenas os destinatários com a Chave Privada correspondente conseguem "abrir o envelope" e ler a chave simétrica.
 
 ### 3. Integridade e Autenticidade (Assinaturas Digitais)
 Para garantir que os dados não foram alterados e vieram mesmo da Alice:
 1.  A Alice calcula o Hash (SHA-256) dos dados encriptados.
 2.  A Alice assina esse hash com a sua **Chave Privada** (RSA-PSS).
-3.  O Bob, ao receber, valida a assinatura usando a **Chave Pública da Alice** (obtida via Discovery). Se a validação falhar, os dados são rejeitados imediatamente.
+3.  Qualquer peer que receba os dados valida a assinatura usando a **Chave Pública da Alice** (obtida via Discovery). Se a validação falhar, os dados são rejeitados imediatamente.
 
 ## Estrutura do Projeto
 
@@ -98,7 +98,7 @@ Para garantir que os dados não foram alterados e vieram mesmo da Alice:
 
 * **Bibliotecas:** Foi utilizada a `cryptography.io`, recomendada pela indústria por evitar vulnerabilidades comuns em implementações manuais de algoritmos matemáticos ("Don't roll your own crypto").
 * **Dinamicidade:** O sistema suporta a entrada e saída dinâmica de nós (Dynamic Join/Leave) graças ao sistema de Heartbeat do Discovery Server.
-* **Data at Rest:** A base de dados armazena apenas BLOBs encriptados e as chaves encriptadas. Mesmo que o ficheiro JSON seja roubado, o atacante não consegue ler o conteúdo sem a chave privada do utilizador.
+* **Data at Rest:** A base de dados armazena apenas BLOBs encriptados e as chaves encriptadas. Mesmo que o ficheiro JSON seja roubado, o atacante não consegue ler o conteúdo sem a chave privada do utilizador legítimo.
 
 ## Autores
 
