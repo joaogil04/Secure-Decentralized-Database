@@ -1,3 +1,18 @@
+"""
+peer_node.py
+
+
+This file implements a secure peer in a decentralized database system.
+Each peer acts both as a client and a server: it stores data locally, accepts
+connections from other peers, and propagates encrypted PUT operations across
+the network. Peers communicate directly with each other, using a discovery
+server only to find currently available peers.
+
+The peer ensures confidentiality, integrity, and authenticity of data by using
+hybrid cryptography (symmetric encryption for data and asymmetric encryption
+for key distribution), as well as digital signatures.
+"""
+
 import socket
 import threading
 import json
@@ -11,36 +26,74 @@ from crypto_utils import (
 from database import LocalDatabase
 
 class PeerNode:
+    """
+    Represents a single peer in the system.
+
+    Each PeerNode:
+    - owns a local database
+    - owns an RSA key pair
+    - listens for incoming TCP connections
+    - sends encrypted and signed data to other peers
+    """
+
     def __init__(self, host, port, my_id, discovery_ip, discovery_port):
+        """
+        Initialize a single peer in the P2P secure distributed database.
+
+
+        Parameters:
+        - host: IP address to bind the peer server to
+        - port: TCP port where the peer will listen
+        - my_id: logical identifier of the peer (e.g., "Alice")
+        - discovery_ip: IP address of the discovery server
+        - discovery_port: port of the discovery server
+        """
         self.host = host
         self.port = port
         self.my_id = my_id
         self.discovery_ip = discovery_ip
         self.discovery_port = discovery_port
         
+        # Local persistent database for this peer
         self.db = LocalDatabase(my_id, folder="peer_data")
         self.sse_index = {} 
         
-        print(f"[{my_id}] A gerar chaves de encriptação (RSA)...")
+        # Generate RSA key pair for this peer
+        print(f"[{my_id}] Generating Encryption Key (RSA)...")
         self.private_key, self.public_key = generate_key_pair()
         self.pub_key_str = serialize_public_key(self.public_key)
 
-    # --- PARTE SERVIDOR ---
+    # ==============================================================
+    # SERVER-SIDE LOGIC
+    # ==============================================================
+    
     def start_server(self):
+        """
+        Start the TCP server that listens for incoming connections
+        from other peers.
+        """
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             server.bind((self.host, self.port))
             server.listen()
-            print(f"[SERVIDOR] Peer {self.my_id} à escuta em {self.host}:{self.port}")
+            print(f"[SERVIDOR] Peer {self.my_id} listening in {self.host}:{self.port}")
             
             while True:
                 conn, addr = server.accept()
                 thread = threading.Thread(target=self.handle_request, args=(conn, addr))
                 thread.start()
         except Exception as e:
-            print(f"[ERRO SERVIDOR] {e}")
+            print(f"[SERVER ERROR] {e}")
 
     def handle_request(self, conn, addr):
+        """
+        Handle an incoming TCP request from another peer.
+
+        The request is expected to be a JSON object with a 'type' field. Supported types:
+        - PING
+        - PUT
+        - SEARCH (placeholder for future work)
+        """
         try:
             data = conn.recv(8192).decode('utf-8')
             if not data: return
@@ -54,13 +107,22 @@ class PeerNode:
             elif request['type'] == 'SEARCH':
                 self.handle_search(request, conn)
         except Exception as e:
-            print(f"[ERRO HANDLER] {e}")
+            print(f"[HANDLER ERROR] {e}")
         finally:
             conn.close()
 
     def handle_put(self, request, conn):
-        print(f"\n[RECEBIDO] PUT de {request.get('sender_id', 'Unknown')}")
+        """
+        Handle an incoming PUT request.
+
+        Steps:
+        1. Verify the digital signature
+        2. If valid, store the encrypted data locally
+        3. Reply with status OK or DENIED
+        """
+        print(f"\n[RECEIVED] PUT from {request.get('sender_id', 'Unknown')}")
         
+        # Verify signature to ensure authenticity and integrity
         valid = verify_signature(
             request['sender_pub_key'], 
             request['encrypted_data'], 
@@ -79,18 +141,26 @@ class PeerNode:
             
             self.db.put(doc_id, storage_item)
             
-            print(f" -> Assinatura VÁLIDA. Dados guardados: {doc_id}")
+            print(f" -> VALID SIGNATURE. Stored data: {doc_id}")
             conn.send(json.dumps({"status": "OK"}).encode())
         else:
-            print(" -> Assinatura INVÁLIDA. Rejeitado.")
+            print(" -> INVALID SIGNATURE. Rejected.")
             conn.send(json.dumps({"status": "DENIED"}).encode())
 
     def handle_search(self, request, conn):
-        print(f"\n[RECEBIDO] SEARCH")
+        print(f"\n[RECEIVED] SEARCH")
         conn.send(json.dumps({"status": "OK", "results": []}).encode())
 
-    # --- PARTE CLIENTE ---
+    # ==============================================================
+    # CLIENT-SIDE LOGIC
+    # ==============================================================
+
     def register_discovery(self):
+        """
+        Register this peer with the discovery server.
+
+        Sends peer ID, listening port, and public key.
+        """
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((self.discovery_ip, self.discovery_port))
@@ -105,9 +175,15 @@ class PeerNode:
             print(f"[DISCOVERY] Registo: {resp['status']}")
             s.close()
         except Exception as e:
-            print(f"[ERRO DISCOVERY] Não foi possível conectar: {e}")
+            print(f"[DISCOVERY ERROR] It was not possible to connect: {e}")
 
     def get_peers(self):
+        """
+        Request the list of currently active peers from the discovery server.
+
+        Returns:
+        - dictionary mapping peer_id -> (ip, port, public_key)
+        """
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((self.discovery_ip, self.discovery_port))
@@ -128,32 +204,41 @@ class PeerNode:
             return {}
 
     def broadcast_data(self, message_text, target_peer_ids):
-        """Envia para todos, com chaves específicas para os destinatários."""
+        """
+        Broadcast encrypted data to all peers, granting decryption access
+        only to specific receivers.
+
+        Parameters:
+        - message_text: plaintext message to send
+        - target_peer_ids: list of peer IDs allowed to decrypt the data
+        """
         all_peers = self.get_peers()
         valid_targets = [pid for pid in target_peer_ids if pid in all_peers]
         
         if not valid_targets:
-            print("[ERRO] Nenhum destinatário encontrado.")
+            print("[ERROR] No receivers found.")
             return
 
-        print(f"[BROADCAST] A enviar para a rede. Acesso para: {valid_targets}")
+        print(f"[BROADCAST] Sending to the network. Access to: {valid_targets}")
 
         try:
-            # 1. Criptografia Simétrica
+            # 1. Generate symmetric key
             file_key = generate_symmetric_key()
+
+            # 2. Encrypt message with symmetric key
             encrypted_bytes = encrypt_data(file_key, message_text)
             encrypted_data_str = encrypted_bytes.decode('utf-8')
 
-            # 2. Assinatura
+            # 3. Sign encrypted data
             signature = sign_data(self.private_key, encrypted_data_str)
 
-            # 3. Múltiplos Envelopes (Dicionário de chaves)
+            # 4. Encrypt symmetric key for each authorized peer
             keys_map = {}
             for pid in valid_targets:
                 target_pub_key = all_peers[pid][2]
                 keys_map[pid] = encrypt_rsa(target_pub_key, file_key)
 
-            # 4. Enviar
+            # 5. Create payload
             doc_id = f"doc-{self.my_id}-{int(time.time())}"
             payload = {
                 "type": "PUT",
@@ -165,6 +250,7 @@ class PeerNode:
                 "sender_pub_key": self.pub_key_str
             }
             
+            # 6. Send payload to all peers
             for peer_id, info in all_peers.items():
                 if peer_id == self.my_id: continue
                 threading.Thread(
@@ -173,9 +259,12 @@ class PeerNode:
                 ).start()
                 
         except Exception as e:
-            print(f"[ERRO BROADCAST] {e}")
+            print(f"[BROADCAST ERROR] {e}")
 
     def _send_thread_worker(self, ip, port, payload, peer_id):
+        """
+        Worker thread that sends a PUT payload to a single peer.
+        """
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(3)
@@ -183,33 +272,38 @@ class PeerNode:
             s.send(json.dumps(payload).encode())
             s.close()
         except:
-            print(f" -> Falha ao enviar para {peer_id}")
+            print(f" -> Failure sending to {peer_id}")
 
-# --- MENU ---
+# ==============================================================
+# COMMAND-LINE INTERFACE
+# ==============================================================
+
 def main():
-    discovery_ip = input("Insira o IP do Discovery Server (Default: 127.0.0.1): ")
+    discovery_ip = input("Insert Discovery Server's IP (Default: 127.0.0.1): ")
     if not discovery_ip: discovery_ip = "127.0.0.1"
     discovery_port = 5000 
 
-    my_id = input("Insira o ID do Peer (ex: Alice): ")
-    my_port_input = input("Insira a porta do Peer (ex: 6001): ")
+    my_id = input("Insert peer's ID (ex: Alice): ")
+    my_port_input = input("Insert peer's port number (ex: 6001): ")
     my_port = int(my_port_input) if my_port_input else 6001
     
     node = PeerNode('0.0.0.0', my_port, my_id, discovery_ip, discovery_port)
     
+    # Start server in background
     server_thread = threading.Thread(target=node.start_server, daemon=True)
     server_thread.start()
-    
     time.sleep(1)
+
+    # Register with discovery server
     node.register_discovery()
     
     while True:
         print("\n--- MENU P2P SECURE DB ---")
-        print("1. Listar Peers")
-        print("2. Enviar Dados (Multi-Destinatário)")
-        print("3. Sair")
-        print("4. Ver os meus dados locais")
-        choice = input("Escolha: ")
+        print("1. List Peers")
+        print("2. Send Data (Multi-Receiver)")
+        print("3. Exit")
+        print("4. See my local data")
+        choice = input("Choose: ")
         
         if choice == '1':
             peers = node.get_peers()
@@ -218,28 +312,28 @@ def main():
         elif choice == '2':
             peers = node.get_peers()
             if not peers:
-                print("Nenhum peer encontrado.")
+                print("No peer found.")
                 continue
             
-            print("Peers disponíveis:", list(peers.keys()))
-            targets_input = input("Destinatários (separar por vírgula): ")
+            print("Available peers:", list(peers.keys()))
+            targets_input = input("Recipient (separate with commas): ")
             target_list = [t.strip() for t in targets_input.split(',') if t.strip()]
             
             if target_list:
-                msg = input("Mensagem: ")
+                msg = input("Message: ")
                 node.broadcast_data(msg, target_list)
             else:
-                print("Lista vazia.")
+                print("Empty list.")
                 
         elif choice == '3':
-            print("A encerrar...")
+            print("Shutting down...")
             sys.exit()
 
         elif choice == '4':
-            print("\n--- MEUS DADOS LOCAIS ---")
+            print("\n--- MY LOCAL DATA ---")
             all_data = node.db.data 
             if not all_data:
-                print("Vazio.")
+                print("Empty.")
             else:
                 for doc_id, item in all_data.items():
                     try:
@@ -252,13 +346,13 @@ def main():
                             my_enc_key = keys_map[node.my_id]
                             sym_key = decrypt_rsa(node.private_key, my_enc_key)
                             plaintext = decrypt_data(sym_key, item['encrypted_data'].encode('utf-8'))
-                            print(f"ID: {doc_id} | De: {sender} | Conteúdo: {plaintext}")
+                            print(f"ID: {doc_id} | From: {sender} | Content: {plaintext}")
                         else:
                             # Tenho o ficheiro mas não sou o destinatário
-                            print(f"ID: {doc_id} | De: {sender} | [ACESSO NEGADO] (Ficheiro cifrado)")
+                            print(f"ID: {doc_id} | From: {sender} | [ACCESS DENIED] (Encrypted file)")
                             
                     except Exception as e:
-                        print(f"ID: {doc_id} | Erro ao ler: {e}")
+                        print(f"ID: {doc_id} | Failed to read: {e}")
 
 if __name__ == "__main__":
     main()
