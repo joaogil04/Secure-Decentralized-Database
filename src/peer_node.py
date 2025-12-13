@@ -131,17 +131,31 @@ class PeerNode:
         
         if valid:
             doc_id = request['doc_id']
+            sender = request.get("sender_id", "Unknown")
+            table = request["table"]  # NEW: table support
+            key = request["key"]
             
             # CORREÇÃO: Guardar 'encrypted_keys' (plural) em vez de singular
             storage_item = {
-                "sender_id": request.get('sender_id'),
+                "sender_id": sender,
+                "table": table,
+                "key": key,  # store the user key
+                "doc_id": doc_id,  # internal doc ID
                 "encrypted_data": request['encrypted_data'],
                 "encrypted_keys": request['encrypted_keys'] # Dicionário {PeerID: Chave}
             }
             
-            self.db.put(doc_id, storage_item)
+            self.db.put(doc_id, storage_item, table) 
             
-            print(f" -> VALID SIGNATURE. Stored data: {doc_id}")
+            if self.my_id in request['encrypted_keys']:
+                auth_status = "AUTHORIZED recipient"
+            else:
+                auth_status = "NOT authorized (ciphertext only)"
+
+            print(
+                print(f"VALID from {sender} | table='{table}', key='{key}', doc_id='{doc_id}' | {auth_status}")
+                )
+            
             conn.send(json.dumps({"status": "OK"}).encode())
         else:
             print(" -> INVALID SIGNATURE. Rejected.")
@@ -203,15 +217,18 @@ class PeerNode:
             print(f"[ERRO GET_PEERS] {e}")
             return {}
 
-    def broadcast_data(self, message_text, target_peer_ids):
+    def broadcast_data(self, message_text, target_peer_ids, table_name, key):
         """
-        Broadcast encrypted data to all peers, granting decryption access
-        only to specific receivers.
+        Broadcast encrypted data (PUT) to all peers, storing it under a specific key (doc_id)
+        in the chosen table. Decryption access is granted only to specific receivers.
 
         Parameters:
-        - message_text: plaintext message to send
+        - message_text: plaintext value to send (v)
         - target_peer_ids: list of peer IDs allowed to decrypt the data
+        - table_name: name of the table to store the key-value pair
+        - doc_id: key under which the value is stored (k)
         """
+
         all_peers = self.get_peers()
         valid_targets = [pid for pid in target_peer_ids if pid in all_peers]
         
@@ -219,7 +236,9 @@ class PeerNode:
             print("[ERROR] No receivers found.")
             return
 
-        print(f"[BROADCAST] Sending to the network. Access to: {valid_targets}")
+        doc_id = f"doc-{self.my_id}-{int(time.time())}"
+
+        print(f"[BROADCAST] Sending '{key}' to: {valid_targets} in table '{table_name}'")
 
         try:
             # 1. Generate symmetric key
@@ -239,11 +258,12 @@ class PeerNode:
                 keys_map[pid] = encrypt_rsa(target_pub_key, file_key)
 
             # 5. Create payload
-            doc_id = f"doc-{self.my_id}-{int(time.time())}"
             payload = {
                 "type": "PUT",
                 "sender_id": self.my_id,
-                "doc_id": doc_id,
+                "table": table_name,  # NEW: include table
+                "key": key,  # User provided key
+                "doc_id": doc_id,  
                 "encrypted_data": encrypted_data_str,
                 "encrypted_keys": keys_map, # Dicionário com chaves para cada destinatário
                 "signature": signature,
@@ -319,40 +339,58 @@ def main():
             targets_input = input("Recipient (separate with commas): ")
             target_list = [t.strip() for t in targets_input.split(',') if t.strip()]
             
-            if target_list:
-                msg = input("Message: ")
-                node.broadcast_data(msg, target_list)
-            else:
-                print("Empty list.")
+            if not target_list:
+                print("Empty recipient list.")
+                continue
+
+            table_name = input("Table name: ").strip()
+            key = input("Key (k): ").strip()
+            value = input("Value (v): ")
+
+            node.broadcast_data(value, target_list, table_name=table_name, key=key)
                 
         elif choice == '3':
             print("Shutting down...")
             sys.exit()
 
         elif choice == '4':
-            print("\n--- MY LOCAL DATA ---")
-            all_data = node.db.data 
-            if not all_data:
-                print("Empty.")
-            else:
-                for doc_id, item in all_data.items():
-                    try:
-                        # CORREÇÃO: Lógica de leitura para Multi-Recipient
-                        keys_map = item['encrypted_keys']
-                        sender = item.get('sender_id', '?')
-                        
-                        if node.my_id in keys_map:
-                            # Sou um destinatário!
-                            my_enc_key = keys_map[node.my_id]
-                            sym_key = decrypt_rsa(node.private_key, my_enc_key)
-                            plaintext = decrypt_data(sym_key, item['encrypted_data'].encode('utf-8'))
-                            print(f"ID: {doc_id} | From: {sender} | Content: {plaintext}")
-                        else:
-                            # Tenho o ficheiro mas não sou o destinatário
-                            print(f"ID: {doc_id} | From: {sender} | [ACCESS DENIED] (Encrypted file)")
-                            
-                    except Exception as e:
-                        print(f"ID: {doc_id} | Failed to read: {e}")
+            try:
+                table = input("Table name: ").strip()
+                key = input("Key (k): ").strip()
+
+                table_data = node.db.get_table(table)  # get full table
+                if not table_data:
+                    print("Table not found or empty.")
+                    continue
+
+                # Find the doc that matches the user-provided key
+                matched_doc = None
+                for doc_id, item in table_data.items():
+                    if item.get('key') == key:
+                        matched_doc = (doc_id, item)
+                        break
+
+                if not matched_doc:
+                    print("Not found.")
+                    continue
+
+                # CORREÇÃO: Lógica de leitura para Multi-Recipient
+                doc_id, item = matched_doc
+                keys_map = item['encrypted_keys']
+                sender = item.get('sender_id', '?')
+                
+                if node.my_id in keys_map:
+                    # Sou um destinatário!
+                    my_enc_key = keys_map[node.my_id]
+                    sym_key = decrypt_rsa(node.private_key, my_enc_key)
+                    plaintext = decrypt_data(sym_key, item['encrypted_data'].encode('utf-8'))
+                    print(f"Key: {key} | Doc ID: {doc_id} | Content: {plaintext}")
+                else:
+                    # Tenho o ficheiro mas não sou o destinatário
+                    print(f"Key: {key} | Doc ID: {doc_id} | [ACCESS DENIED] (Encrypted file)")
+                
+            except Exception as e:
+                print(f"ID: {doc_id} | Failed to read: {e}")
 
 if __name__ == "__main__":
     main()

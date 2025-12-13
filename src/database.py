@@ -32,11 +32,9 @@ class LocalDatabase:
         NOTA: Separa dados de código criando uma pasta 'peer_data'.
         """
         self.folder = folder
-
-        # File name is unique per peer
-        self.filename = f"storage_{peer_id}.json"
+        self.filename = f"storage_{peer_id}.json"  # File name is unique per peer
         self.filepath = os.path.join(self.folder, self.filename)
-        self.data = {}
+        self.data = {}  # { "TableName": { key: value, ... } }
         
         # Ensure storage directory exists and load existing data
         self._ensure_folder_exists()
@@ -84,23 +82,24 @@ class LocalDatabase:
         except Exception as e:
             print(f"[DB] Failed to save database: {e}")
 
-    def put(self, key, value):
+    def put(self, doc_id, value, table):
         """
-        Stores a value under a given key and immediately saves it to disk.
+        Store a document in a given table using its internal doc_id.
+        Creates the table if it doesn't exist.
 
-        - param key: Key under which the value is stored
-        - param value: Encrypted data to store
+        - doc_id: Internal unique document ID
+        - value: Dictionary containing at least 'key', 'encrypted_data', 'encrypted_keys', etc.
+        - table: Table name
         """
 
-        self.data[key] = value
+        if table not in self.data:
+            self.data[table] = {}
+        
+        self.data[table][doc_id] = value
         self.save()
-
-    def get(self, key):
-        """
-        Retrieves the value associated with a given key.
-
-        - param key: Key to retrieve
-        - return: Stored value or None if the key does not exist
-        """
-        return self.data.get(key)
     
+    def get_table(self, table):
+        """
+        Return the whole table as a dictionary.
+        """
+        return self.data.get(table, {})
