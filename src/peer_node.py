@@ -18,10 +18,11 @@ import threading
 import json
 import time
 import sys
+import os
 from crypto_utils import (
     verify_signature, sign_data, generate_key_pair, serialize_public_key, 
-    load_key_from_file, encrypt_data, decrypt_data, generate_symmetric_key, 
-    encrypt_rsa, decrypt_rsa
+    encrypt_data, decrypt_data, generate_symmetric_key, 
+    encrypt_rsa, decrypt_rsa, create_and_split_identity, load_identity_with_shares
 )
 from database import LocalDatabase
 
@@ -36,7 +37,7 @@ class PeerNode:
     - sends encrypted and signed data to other peers
     """
 
-    def __init__(self, host, port, my_id, discovery_ip, discovery_port):
+    def __init__(self, host, port, my_id, discovery_ip, discovery_port, password):
         """
         Initialize a single peer in the P2P secure distributed database.
 
@@ -57,10 +58,24 @@ class PeerNode:
         # Local persistent database for this peer
         self.db = LocalDatabase(my_id, folder="peer_data")
         self.sse_index = {} 
+
+        # --- IDENTITY MANAGEMENT (SSS) ---
+        print(f"[{my_id}] Checking identity secure storage...")
+        if os.path.exists("keys/identity.enc"):
+            print(" -> Identity found. Reconstructing with Secret Sharing...")
+            self.private_key, self.public_key = load_identity_with_shares(password)
+
+            if self.private_key is None:
+                print("CRITICAL ERROR: Wrong password or corrupted key shares.")
+                sys.exit(1)
+            else:
+                print(" -> Success! Private key reconstructed in memory.")
         
-        # Generate RSA key pair for this peer
-        print(f"[{my_id}] Generating Encryption Key (RSA)...")
-        self.private_key, self.public_key = generate_key_pair()
+        else:
+            print(" -> No identity found. Creating new one with SSS protection...")
+            self.private_key, self.public_key = create_and_split_identity(password)
+            print(" -> Identity created and protected (Threshold 2-of-2).")
+
         self.pub_key_str = serialize_public_key(self.public_key)
 
     # ==============================================================
@@ -306,8 +321,10 @@ def main():
     my_id = input("Insert peer's ID (ex: Alice): ")
     my_port_input = input("Insert peer's port number (ex: 6001): ")
     my_port = int(my_port_input) if my_port_input else 6001
+
+    password = input(f"Enter password for {my_id}'s secure vault: ")
     
-    node = PeerNode('0.0.0.0', my_port, my_id, discovery_ip, discovery_port)
+    node = PeerNode('0.0.0.0', my_port, my_id, discovery_ip, discovery_port, password)
     
     # Start server in background
     server_thread = threading.Thread(target=node.start_server, daemon=True)
