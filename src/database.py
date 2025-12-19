@@ -103,3 +103,53 @@ class LocalDatabase:
         Return the whole table as a dictionary.
         """
         return self.data.get(table, {})
+    
+    # ==============================================================
+    # SEARCHABLE SYMMETRIC ENCRYPTION (SSE) INDEX METHODS
+    # ==============================================================
+
+    def put_search_index(self, table, trapdoor, doc_id):
+        """
+        Store a search index entry linking a trapdoor to a document.
+        Allows querying which documents contain a keyword.
+        
+        The search index is stored separately from encrypted data to enable
+        fast keyword searches without decryption.
+        
+        - param table: Table name
+        - param trapdoor: The trapdoor for the keyword (base64 string)
+        - param doc_id: The document ID that contains this keyword
+        """
+        if "search_index" not in self.data:
+            self.data["search_index"] = {}
+        
+        if table not in self.data["search_index"]:
+            self.data["search_index"][table] = {}
+        
+        if trapdoor not in self.data["search_index"][table]:
+            self.data["search_index"][table][trapdoor] = []
+        
+        if doc_id not in self.data["search_index"][table][trapdoor]:
+            self.data["search_index"][table][trapdoor].append(doc_id)
+        
+        self.save()
+
+    def search_by_trapdoor(self, table, trapdoor):
+        """
+        Search for all documents matching a trapdoor in a table.
+        
+        This function performs privacy-preserving search by matching the
+        trapdoor (deterministic keyword hash) against the search index.
+        The server never learns the actual keyword, only the trapdoor.
+        
+        - param table: Table name to search in
+        - param trapdoor: The search trapdoor (base64 string)
+        - return: List of matching document IDs, or empty list if none found
+        """
+        if "search_index" not in self.data:
+            return []
+        
+        index = self.data.get("search_index", {})
+        table_index = index.get(table, {})
+        
+        return table_index.get(trapdoor, [])

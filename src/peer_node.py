@@ -22,9 +22,13 @@ import os
 from crypto_utils import (
     verify_signature, sign_data, generate_key_pair, serialize_public_key, 
     encrypt_data, decrypt_data, generate_symmetric_key, 
-    encrypt_rsa, decrypt_rsa, create_and_split_identity, load_identity_with_shares
+    encrypt_rsa, decrypt_rsa, create_and_split_identity, load_identity_with_shares,
+    derive_search_key, generate_trapdoor, create_search_index
 )
 from database import LocalDatabase
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 
 class PeerNode:
     """
@@ -77,6 +81,11 @@ class PeerNode:
             print(" -> Identity created and protected (Threshold 2-of-2).")
 
         self.pub_key_str = serialize_public_key(self.public_key)
+
+        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+        digest.update(self.pub_key_str.encode('utf-8'))
+        key_material = digest.finalize()
+        self.search_master_key = derive_search_key(key_material)
 
     # ==============================================================
     # SERVER-SIDE LOGIC
@@ -284,8 +293,14 @@ class PeerNode:
                 "signature": signature,
                 "sender_pub_key": self.pub_key_str
             }
+
+            # 6. Build search index for keywords
+            keywords = message_text.split()
+            for keyword in keywords:
+                trapdoor, _ = create_search_index(self.search_master_key, keyword, doc_id)
+                self.db.put_search_index(table_name, trapdoor, doc_id)
             
-            # 6. Send payload to all peers
+            # 7. Send payload to all peers
             for peer_id, info in all_peers.items():
                 if peer_id == self.my_id: continue
                 threading.Thread(
@@ -308,6 +323,34 @@ class PeerNode:
             s.close()
         except:
             print(f" -> Failure sending to {peer_id}")
+
+    def search_keyword(self, keyword, table_name):
+        """
+        Search for documents containing a keyword in a specific table.
+        
+        This method uses SSE (Searchable Symmetric Encryption) to find
+        documents without decrypting them. Only the peer performing the
+        search needs access to the search_master_key.
+        
+        - param keyword: The keyword to search for
+        - param table_name: The table name to search in
+        """
+        trapdoor = generate_trapdoor(self.search_master_key, keyword)
+        matching_docs = self.db.search_by_trapdoor(table_name, trapdoor)
+        
+        if not matching_docs:
+            print(f"[SEARCH] No documents found for '{keyword}' in table '{table_name}'")
+            return
+        
+        print(f"[SEARCH] Found {len(matching_docs)} document(s) matching '{keyword}':")
+        
+        table_data = self.db.get_table(table_name)
+        for doc_id in matching_docs:
+            if doc_id in table_data:
+                item = table_data[doc_id]
+                key = item.get('key', 'N/A')
+                sender = item.get('sender_id', '?')
+                print(f"  - Doc ID: {doc_id} | Key: {key} | From: {sender}")
 
 # ==============================================================
 # COMMAND-LINE INTERFACE
@@ -340,6 +383,7 @@ def main():
         print("2. Send Data (Multi-Receiver)")
         print("3. Exit")
         print("4. See my local data")
+        print("5. Search keyword (SSE)")
         choice = input("Choose: ")
         
         if choice == '1':
@@ -409,5 +453,15 @@ def main():
             except Exception as e:
                 print(f"ID: {doc_id} | Failed to read: {e}")
 
+        elif choice == '5':
+            table_name = input("Table name: ").strip()
+            keyword = input("Search keyword: ").strip()
+            
+            if not table_name or not keyword:
+                print("Invalid input.")
+                continue
+            
+            node.search_keyword(keyword, table_name)
+            
 if __name__ == "__main__":
     main()

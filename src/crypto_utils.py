@@ -20,8 +20,11 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 import secrets
+import hmac
 
 # ==============================================================
 # SHAMIR SECRET SHARING CONSTANTS & MATH
@@ -365,3 +368,83 @@ def decrypt_rsa(private_key, encrypted_b64):
         )
     )
     return decrypted # Retorna os bytes da chave simétrica
+
+# ==============================================================
+# SEARCHABLE SYMMETRIC ENCRYPTION (SSE)
+# Lightweight SSE-2 scheme for keyword search
+# ==============================================================
+
+def derive_search_key(master_key, salt=None):
+    """
+    Derives a search master key from the data encryption key.
+    This key is used to generate trapdoors for search.
+    
+    - param master_key: The main encryption key (bytes)
+    - param salt: Optional salt for key derivation
+    - return: Derived search key (bytes)
+    """
+    if salt is None:
+        salt = b'SSE_SEARCH_KEY'
+    
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b'search_trapdoor',
+        backend=default_backend()
+    )
+    return hkdf.derive(master_key)
+
+def generate_trapdoor(search_key, keyword):
+    """
+    Generates a trapdoor (search token) for a given keyword.
+    The trapdoor is deterministic: same keyword → same trapdoor.
+    
+    Security: Trapdoor reveals search patterns but not the keyword itself.
+    
+    - param search_key: The search master key (bytes)
+    - param keyword: The keyword to search for (string)
+    - return: Trapdoor token (base64 string)
+    """
+    if isinstance(keyword, str):
+        keyword = keyword.encode('utf-8')
+    
+    trapdoor = hmac.new(search_key, keyword, 'sha256').digest()
+    return base64.b64encode(trapdoor).decode('utf-8')
+
+def create_search_index(search_key, keyword, doc_id):
+    """
+    Creates an encrypted index entry for a keyword in a document.
+    
+    - param search_key: The search master key (bytes)
+    - param keyword: The keyword appearing in the document (string)
+    - param doc_id: The document identifier
+    - return: (trapdoor, encrypted_entry) tuple
+    """
+    trapdoor = generate_trapdoor(search_key, keyword)
+    
+    # Encrypt the doc_id with HMAC to create the index entry
+    if isinstance(doc_id, str):
+        doc_id = doc_id.encode('utf-8')
+    
+    index_entry = hmac.new(
+        search_key, 
+        trapdoor.encode('utf-8') + doc_id, 
+        'sha256'
+    ).digest()
+    
+    return trapdoor, base64.b64encode(index_entry).decode('utf-8')
+
+def verify_search_match(search_key, keyword, doc_id, stored_entry):
+    """
+    Verifies if a stored index entry matches the search query.
+    Used by the server to find matching documents.
+    
+    - param search_key: The search master key (bytes)
+    - param keyword: The searched keyword
+    - param doc_id: The document ID to verify
+    - param stored_entry: The encrypted index entry from storage
+    - return: Boolean indicating if there's a match
+    """
+    _, computed_entry = create_search_index(search_key, keyword, doc_id)
+    return computed_entry == stored_entry
