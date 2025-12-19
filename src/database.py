@@ -153,3 +153,43 @@ class LocalDatabase:
         table_index = index.get(table, {})
         
         return table_index.get(trapdoor, [])
+
+    def search_by_key(self, key):
+        """
+        Search for all tables where a specific user key appears.
+        
+        - param key: The user-provided key to search for
+        - return: List of table names where the key appears
+        """
+        tables_with_key = []
+        
+        for table_name, table_data in self.data.items():
+            # Skip search_index table
+            if table_name == "search_index":
+                continue
+            
+            # Check each document in the table
+            for doc_id, item in table_data.items():
+                if isinstance(item, dict) and item.get('key') == key:
+                    if table_name not in tables_with_key:
+                        tables_with_key.append(table_name)
+                    break
+        
+        return tables_with_key
+    
+    def search_tables_by_trapdoor(self, trapdoor):
+        """
+        Retorna uma lista de nomes de tabelas onde este trapdoor aparece.
+        """
+        found_tables = []
+        if "search_index" not in self.data:
+            return []
+
+        search_index = self.data["search_index"]
+        
+        # Iterar sobre todas as tabelas no índice
+        for table_name, traps in search_index.items():
+            if trapdoor in traps:
+                found_tables.append(table_name)
+        
+        return found_tables
