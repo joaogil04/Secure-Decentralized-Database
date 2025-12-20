@@ -81,7 +81,7 @@ Provide the following inputs when prompted:
 
 This project follows the **"Encrypt-then-Sign"** paradigm and utilizes **Hybrid Encryption (Digital Envelope)** alongside **Searchable Encryption** protocols.
 
-1. **Identity Management (Shamir's Secret Sharing)**
+**1. Identity Management (Shamir's Secret Sharing)**
 
 Peers do not store their RSA Private Keys in plaintext. Instead, the identity is protected using a 2-of-2 Shamir's Secret Sharing scheme:
 
@@ -89,29 +89,29 @@ Peers do not store their RSA Private Keys in plaintext. Instead, the identity is
 
 * **Share 2 (Knowledge):** Encrypted with a key derived from the user's password (share_pass.dat). Both shares are required to reconstruct the Master Key in memory, which then decrypts the RSA Private Key.
 
-2. **Confidentiality (AES + RSA)**
+**2. Confidentiality (AES + RSA)**
 
 When sending a file to the network (e.g., Alice to Bob and Charlie):
 
-1. A random, unique **Symmetric Key (AES-128)** is generated for the message.
+   1. A random, unique **Symmetric Key (AES-128)** is generated for the message.
 
-2. The data is encrypted with this key (using Fernet, which includes HMAC for integrity).
+   2. The data is encrypted with this key (using Fernet, which includes HMAC for integrity).
 
-3. The symmetric key is encrypted repeatedly with the **Public Key of each recipient** (RSA-OAEP).
+   3. The symmetric key is encrypted repeatedly with the **Public Key of each recipient** (RSA-OAEP).
 
-4. Only recipients with the corresponding Private Key can decrypt the symmetric key to read the data.
+   4. Only recipients with the corresponding Private Key can decrypt the symmetric key to read the data.
 
-3. **Integrity and Authenticity (Digital Signatures)**
+**3. Integrity and Authenticity (Digital Signatures)**
 
 To ensure data origin and prevent tampering:
 
-1. The sender calculates the SHA-256 hash of the encrypted data.
+   1. The sender calculates the SHA-256 hash of the encrypted data.
 
-2. The sender signs this hash with their **Private Key** (RSA-PSS).
+   2. The sender signs this hash with their **Private Key** (RSA-PSS).
 
-3. Receivers verify the signature using the sender's **Public Key**. If validation fails, the data is rejected.
+   3. Receivers verify the signature using the sender's **Public Key**. If validation fails, the data is rejected.
 
-4. **Searchable Symmetric Encryption (SSE)**
+**4. Searchable Symmetric Encryption (SSE)**
 
 The system allows searching for encrypted data without decrypting it:
 
