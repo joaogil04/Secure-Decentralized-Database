@@ -1,21 +1,22 @@
 """
 crypto_utils.py
 
+This file contains all cryptographic primitives and utility functions used in the system.
 
-This file contains all cryptographic tools used.
+It implements:
+1. Symmetric Encryption: AES-128 (CBC mode) with HMAC (via Fernet) for data confidentiality and integrity.
+2. Asymmetric Encryption: RSA-2048 (OAEP padding) for secure key distribution (Digital Envelope).
+3. Digital Signatures: RSA-PSS for non-repudiation and authenticity.
+4. Key Management: Shamir's Secret Sharing (SSS) for splitting private keys.
+5. Searchable Encryption (SSE): HKDF and HMAC-based trapdoor generation.
 
-It provides functions for:
-- symmetric encryption and decryption of data;
-- asymmetric encryption for key distribution;
-- digital signatures;
-- basic key serialization and storage.
-
-Everything was implemented using standard, well-established 
-algorithms provided by the cryptography library.
+Dependencies: 'cryptography' library (PyCA).
 """
 
 import os
 import base64
+import secrets
+import hmac
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
@@ -23,24 +24,29 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
-import secrets
-import hmac
 
 # ==============================================================
-# SHAMIR SECRET SHARING CONSTANTS & MATH
+# SHAMIR SECRET SHARING (SSS) CONSTANTS & MATH
 # ==============================================================
-# Mersenne Prime 2^127 - 1 (Sufficient for 32-byte keys)
+# We use a finite field GF(p) defined by a large Mersenne Prime.
+# 2^521 - 1 is chosen to accommodate secrets larger than 32 bytes (e.g., serialized keys).
 PRIME = 2**521 - 1
 
 def _eval_poly(poly, x):
-    """Evaluates polynomial at x."""
+    """
+    Evaluates a polynomial at x within the finite field GF(PRIME).
+    Used to generate shares.
+    """
     result = 0
     for coeff in reversed(poly):
         result = (result * x + coeff) % PRIME
     return result
 
 def _lagrange_interpolation(x, x_s, y_s):
-    """Reconstructs the secret (f(0)) using Lagrange interpolation."""
+    """
+    Reconstructs the secret (f(0)) using Lagrange Interpolation.
+    Given k points, it finds the unique polynomial of degree k-1.
+    """
     k = len(x_s)
     secret = 0
     for j in range(k):
@@ -51,21 +57,27 @@ def _lagrange_interpolation(x, x_s, y_s):
             numerator = (numerator * (x - x_s[m])) % PRIME
             denominator = (denominator * (x_s[j] - x_s[m])) % PRIME
         
-        # Modular inverse
+        # Calculate modular inverse using Fermat's Little Theorem
         lagrange_term = y_s[j] * numerator * pow(denominator, PRIME - 2, PRIME)
         secret = (secret + lagrange_term) % PRIME
     return secret
 
 def split_secret(secret_bytes, t, n):
     """
-    Splits a secret (bytes) into n shares, requiring t to recover.
-    Returns a list of tuples (x, y).
+    Splits a secret into n shares using Shamir's Secret Sharing Scheme.
+    Requires t shares to reconstruct the original secret.
+    
+    - param secret_bytes: The secret to protect.
+    - param t: Threshold (minimum shares needed).
+    - param n: Total number of shares to generate.
+    - return: List of tuples (x, y).
     """
     secret_int = int.from_bytes(secret_bytes, byteorder='big')
     if secret_int >= PRIME:
-        raise ValueError("Secret too large for this prime.")
+        raise ValueError("Secret too large for the defined finite field.")
 
-    # Generate random coefficients for polynomial of degree t-1
+    # Generate random coefficients for a polynomial of degree t-1
+    # The free coefficient (f(0)) is the secret itself.
     coeffs = [secret_int] + [secrets.randbelow(PRIME) for _ in range(t - 1)]
     
     shares = []
@@ -77,19 +89,20 @@ def split_secret(secret_bytes, t, n):
 
 def recover_secret(shares):
     """
-    Recovers the secret bytes from a list of shares [(x, y), ...].
+    Recovers the secret bytes from a list of shares using Lagrange Interpolation.
     """
     if len(shares) < 2: 
-        raise ValueError("Not enough shares.")
+        raise ValueError("Not enough shares to reconstruct the secret.")
     
     x_s, y_s = zip(*shares)
     secret_int = _lagrange_interpolation(0, x_s, y_s)
     
-    # Convert back to 32 bytes (standard for Fernet keys)
+    # Convert integer back to bytes
+    # Fernet keys are 32 bytes, but we allow flexibility
     try:
         return secret_int.to_bytes(32, byteorder='big')
     except:
-        # Fallback padding calculation
+        # Fallback for dynamic length calculation
         return secret_int.to_bytes((secret_int.bit_length() + 7) // 8, byteorder='big')
     
 # ==============================================================
@@ -97,6 +110,7 @@ def recover_secret(shares):
 # ==============================================================
 
 def save_file(data, filename, folder="keys"):
+    """Saves raw bytes to a file, ensuring the directory exists."""
     if not os.path.exists(folder):
         os.makedirs(folder)
     filepath = os.path.join(folder, filename)
@@ -105,13 +119,17 @@ def save_file(data, filename, folder="keys"):
     return filepath
 
 def load_file(filename, folder="keys"):
+    """Loads raw bytes from a file."""
     filepath = os.path.join(folder, filename)
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
     return open(filepath, "rb").read()
 
 def derive_key_from_password(password, salt=None):
-    """Derives a secure AES key from a password using PBKDF2."""
+    """
+    Derives a cryptographic key from a password using PBKDF2-HMAC-SHA256.
+    This strengthens the password against brute-force attacks.
+    """
     if salt is None:
         salt = os.urandom(16)
     
@@ -130,9 +148,14 @@ def derive_key_from_password(password, salt=None):
 
 def create_and_split_identity(password):
     """
-    1. Generates RSA Key Pair.
-    2. Encrypts Private Key with a random Master Key.
-    3. Splits Master Key into 2 shares (Disk + Password).
+    Creates a new Identity (RSA Keypair) and protects it using SSS.
+    
+    Process:
+    1. Generate RSA Key Pair.
+    2. Encrypt Private Key with a random symmetric 'Master Key'.
+    3. Split 'Master Key' into 2 shares:
+       - Share 1: Stored in plaintext on disk (Proof of Possession).
+       - Share 2: Encrypted with the user's password (Proof of Knowledge).
     """
     # 1. Generate RSA
     private_key, public_key = generate_key_pair()
@@ -160,7 +183,7 @@ def create_and_split_identity(password):
     # Share 1: Plaintext on disk
     save_file(f"{share_disk[0]}:{share_disk[1]}".encode(), "share_disk.dat")
     
-    # Share 2: Encrypted with Password
+    # Share 2: Encrypted with Password derived key
     pass_key, salt = derive_key_from_password(password)
     f_pass = Fernet(base64.urlsafe_b64encode(pass_key))
     
@@ -174,7 +197,8 @@ def create_and_split_identity(password):
 
 def load_identity_with_shares(password):
     """
-    Reconstructs the private key using the disk share + password share.
+    Reconstructs the private key by combining the Disk Share and Password Share.
+    This implements a Two-Factor protection (Something you have + Something you know).
     """
     try:
         # Load files
@@ -194,7 +218,7 @@ def load_identity_with_shares(password):
         y_pass = int(f_pass.decrypt(enc_y).decode())
         share_pass = (2, y_pass)
         
-        # Reconstruct Master Key
+        # Reconstruct Master Key using SSS
         shares = [share_disk, share_pass]
         master_key_bytes = recover_secret(shares)
         master_key = base64.urlsafe_b64encode(master_key_bytes)
@@ -215,50 +239,30 @@ def load_identity_with_shares(password):
 
 # ==============================================================
 # SYMMETRIC CRYPTOGRAPHY (AES-128 + HMAC)
-# Slide 56: Authenticated Encryption (Encrypt-then-MAC)
 # ==============================================================
-# Uses Fernet --> AES encryption with built-in authentication
 
 def generate_symmetric_key():
-    """
-    Generates a new symmetric key using Fernet (AES + HMAC).
-    """
-
+    """Generates a new Fernet key (AES-128 in CBC mode with SHA256 HMAC)."""
     return Fernet.generate_key()
 
 def encrypt_data(key, plaintext):
-    """
-    Encrypts plaintext data using a symmetric key with Fernet (AES).
-    """
-
+    """Encrypts data using Fernet (Authenticated Encryption)."""
     f = Fernet(key)
     if isinstance(plaintext, str):
         plaintext = plaintext.encode('utf-8')
     return f.encrypt(plaintext)
 
 def decrypt_data(key, ciphertext):
-    """
-    Decrypts data using a symmetric key and verifies its integrity.
-    """
-
+    """Decrypts data and verifies HMAC integrity."""
     f = Fernet(key)
     return f.decrypt(ciphertext).decode('utf-8')
 
-
 # ==============================================================
-# ASYMMETRIC CRYPTOGRAPHY (RSA-PSS)
-# Slide 62: Digital Signatures & Public Key Encryption
+# ASYMMETRIC CRYPTOGRAPHY (RSA)
 # ==============================================================
-# Used for key exchange and digital signatures
 
 def generate_key_pair():
-    """
-    Generates a new RSA 2048-bit key pair.
-
-    The private key is used for decryption and signing, while the public key
-    is shared with other peers.
-    """
-
+    """Generates RSA 2048-bit key pair."""
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
@@ -267,10 +271,7 @@ def generate_key_pair():
     return private_key, public_key
 
 def serialize_public_key(public_key):
-    """
-    Converts the public key to PEM format for network transmission.
-    """
-
+    """Serializes Public Key to PEM format (X.509 SubjectPublicKeyInfo)."""
     pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -278,16 +279,13 @@ def serialize_public_key(public_key):
     return pem.decode('utf-8')
 
 def load_public_key(pem_string):
-    """
-    Loads a public key from a PEM-encoded string.
-    """
-
+    """Loads Public Key from PEM string."""
     return serialization.load_pem_public_key(pem_string.encode('utf-8'))
 
 def sign_data(private_key, data):
     """
-    Signs data using the sender's private RSA-PSS with SHA256 key.
-    This signature allows receivers to verify both integrity and authenticity.
+    Signs data using RSA-PSS padding with SHA256.
+    PSS is preferred over PKCS1v1.5 for better security proofs.
     """
     if isinstance(data, str):
         data = data.encode('utf-8')
@@ -303,10 +301,7 @@ def sign_data(private_key, data):
     return base64.b64encode(signature).decode('utf-8')
 
 def verify_signature(public_key_pem, data, signature_b64):
-    """
-    Verifies a digital signature using the sender's public key.
-    """
-
+    """Verifies RSA-PSS signature."""
     try:
         public_key = load_public_key(public_key_pem)
         signature_bytes = base64.b64decode(signature_b64)
@@ -324,20 +319,13 @@ def verify_signature(public_key_pem, data, signature_b64):
             hashes.SHA256()
         )
         return True
-    
-    except InvalidSignature:
-        return False
-    
-    except Exception as e:
-        print(f"Signature verification error: {e}")
+    except (InvalidSignature, Exception):
         return False
     
 def encrypt_rsa(public_key_pem, message_bytes):
     """
-    Encrypts data using a recipient's public RSA key.
-
-    This function is used to encrypt symmetric keys before sending
-    them to authorized peers.
+    Encrypts small data (e.g., symmetric keys) using RSA-OAEP with SHA256.
+    Used for the Digital Envelope scheme.
     """
     public_key = load_public_key(public_key_pem)
     encrypted = public_key.encrypt(
@@ -351,15 +339,9 @@ def encrypt_rsa(public_key_pem, message_bytes):
     return base64.b64encode(encrypted).decode('utf-8')
 
 def decrypt_rsa(private_key, encrypted_b64):
-    """
-    Decrypts RSA-encrypted data using the local private key.
-
-    This is used by peers to recover the symmetric key needed to decrypt
-    the actual message content.
-    """
-    
+    """Decrypts RSA-OAEP encrypted data."""
     encrypted_bytes = base64.b64decode(encrypted_b64)
-    decrypted = private_key.decrypt(
+    return private_key.decrypt(
         encrypted_bytes,
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -367,44 +349,43 @@ def decrypt_rsa(private_key, encrypted_b64):
             label=None
         )
     )
-    return decrypted # Retorna os bytes da chave simétrica
 
 # ==============================================================
 # SEARCHABLE SYMMETRIC ENCRYPTION (SSE)
-# Lightweight SSE-2 scheme for keyword search
 # ==============================================================
 
-def derive_search_key(master_key, salt=None):
+# Shared cluster key for distributed search.
+# In a production system, this should be securely negotiated.
+CLUSTER_SEARCH_KEY = b'PROJECT_DPS_CLUSTER_KEY_2025_FIXED'
+
+def derive_search_key(master_key=None, salt=None):
     """
-    Derives a search master key from the data encryption key.
-    This key is used to generate trapdoors for search.
+    Derives a secure search key using HKDF (HMAC-based Key Derivation Function).
     
-    - param master_key: The main encryption key (bytes)
-    - param salt: Optional salt for key derivation
-    - return: Derived search key (bytes)
+    - param master_key: The input key material. If None, uses the CLUSTER_SEARCH_KEY
+                        to allow global search across peers.
     """
+    if master_key is None:
+        master_key = CLUSTER_SEARCH_KEY
+
     if salt is None:
-        salt = b'SSE_SEARCH_KEY'
+        salt = b'SSE_SEARCH_SALT_DEFAULT'
     
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        info=b'search_trapdoor',
+        info=b'search_trapdoor_derivation',
         backend=default_backend()
     )
     return hkdf.derive(master_key)
 
 def generate_trapdoor(search_key, keyword):
     """
-    Generates a trapdoor (search token) for a given keyword.
-    The trapdoor is deterministic: same keyword → same trapdoor.
+    Generates a deterministic trapdoor for a keyword using HMAC-SHA256.
     
-    Security: Trapdoor reveals search patterns but not the keyword itself.
-    
-    - param search_key: The search master key (bytes)
-    - param keyword: The keyword to search for (string)
-    - return: Trapdoor token (base64 string)
+    This acts as a secure search token: 
+    Trapdoor = HMAC(SearchKey, Keyword)
     """
     if isinstance(keyword, str):
         keyword = keyword.encode('utf-8')
@@ -414,19 +395,20 @@ def generate_trapdoor(search_key, keyword):
 
 def create_search_index(search_key, keyword, doc_id):
     """
-    Creates an encrypted index entry for a keyword in a document.
+    Helper to create SSE index entries.
     
-    - param search_key: The search master key (bytes)
-    - param keyword: The keyword appearing in the document (string)
-    - param doc_id: The document identifier
-    - return: (trapdoor, encrypted_entry) tuple
+    Returns:
+        (trapdoor, encrypted_entry)
+        
+    Note: The 'encrypted_entry' (HMAC of ID) is generated for robustness but
+    current database implementation may only use the 'trapdoor' for indexing.
     """
     trapdoor = generate_trapdoor(search_key, keyword)
     
-    # Encrypt the doc_id with HMAC to create the index entry
     if isinstance(doc_id, str):
         doc_id = doc_id.encode('utf-8')
     
+    # Create an integrity-protected index entry
     index_entry = hmac.new(
         search_key, 
         trapdoor.encode('utf-8') + doc_id, 
@@ -437,14 +419,8 @@ def create_search_index(search_key, keyword, doc_id):
 
 def verify_search_match(search_key, keyword, doc_id, stored_entry):
     """
-    Verifies if a stored index entry matches the search query.
-    Used by the server to find matching documents.
-    
-    - param search_key: The search master key (bytes)
-    - param keyword: The searched keyword
-    - param doc_id: The document ID to verify
-    - param stored_entry: The encrypted index entry from storage
-    - return: Boolean indicating if there's a match
+    Verifies if a specific document matches a keyword using the encrypted entry.
+    Uses constant-time comparison to prevent timing attacks.
     """
     _, computed_entry = create_search_index(search_key, keyword, doc_id)
-    return computed_entry == stored_entry
+    return secrets.compare_digest(stored_entry, computed_entry)

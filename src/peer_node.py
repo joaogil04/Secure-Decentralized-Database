@@ -1,16 +1,19 @@
 """
 peer_node.py
 
-
 This file implements a secure peer in a decentralized database system.
-Each peer acts both as a client and a server: it stores data locally, accepts
-connections from other peers, and propagates encrypted PUT operations across
-the network. Peers communicate directly with each other, using a discovery
-server only to find currently available peers.
 
-The peer ensures confidentiality, integrity, and authenticity of data by using
-hybrid cryptography (symmetric encryption for data and asymmetric encryption
-for key distribution), as well as digital signatures.
+Architecture:
+Each peer acts as both a client and a server (P2P Model):
+1. Server: Listens for TCP connections to receive PUT (storage) and SEARCH requests.
+2. Client: Connects to other peers to propagate data and query the network.
+3. Discovery: Uses a central Directory Service only to find active peers (IP/Port).
+
+Security Mechanisms:
+- Confidentiality: Hybrid Encryption (AES for data, RSA for key distribution).
+- Integrity/Authenticity: Digital Signatures (RSA-PSS).
+- Privacy: Searchable Symmetric Encryption (SSE) for privacy-preserving queries.
+- Identity Protection: Shamir's Secret Sharing (SSS) for private key storage.
 """
 
 import socket
@@ -23,35 +26,31 @@ from crypto_utils import (
     verify_signature, sign_data, generate_key_pair, serialize_public_key, 
     encrypt_data, decrypt_data, generate_symmetric_key, 
     encrypt_rsa, decrypt_rsa, create_and_split_identity, load_identity_with_shares,
-    derive_search_key, generate_trapdoor, create_search_index
+    derive_search_key, generate_trapdoor, create_search_index,
+    CLUSTER_SEARCH_KEY # Imported to ensure all peers use the same derivation base
 )
 from database import LocalDatabase
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
-
 class PeerNode:
     """
-    Represents a single peer in the system.
+    Represents a single peer node in the network.
 
-    Each PeerNode:
-    - owns a local database
-    - owns an RSA key pair
-    - listens for incoming TCP connections
-    - sends encrypted and signed data to other peers
+    Responsibilities:
+    - Managing local persistent storage (LocalDatabase).
+    - Managing cryptographic identity (RSA Keys).
+    - Handling network protocols (PUT, GET, SEARCH).
     """
 
     def __init__(self, host, port, my_id, discovery_ip, discovery_port, password):
         """
-        Initialize a single peer in the P2P secure distributed database.
+        Initialize the peer node.
 
-
-        Parameters:
-        - host: IP address to bind the peer server to
-        - port: TCP port where the peer will listen
-        - my_id: logical identifier of the peer (e.g., "Alice")
-        - discovery_ip: IP address of the discovery server
-        - discovery_port: port of the discovery server
+        - param host: Local IP to bind.
+        - param port: Local TCP port.
+        - param my_id: Unique identifier (e.g., "Alice").
+        - param discovery_ip: Discovery Server IP.
+        - param discovery_port: Discovery Server Port.
+        - param password: User password to unlock the private key (SSS).
         """
         self.host = host
         self.port = port
@@ -59,18 +58,17 @@ class PeerNode:
         self.discovery_ip = discovery_ip
         self.discovery_port = discovery_port
         
-        # Local persistent database for this peer
+        # Local persistent database
         self.db = LocalDatabase(my_id, folder="peer_data")
-        self.sse_index = {} 
 
-        # --- IDENTITY MANAGEMENT (SSS) ---
-        print(f"[{my_id}] Checking identity secure storage...")
+        # --- IDENTITY MANAGEMENT (Shamir's Secret Sharing) ---
+        print(f"[{my_id}] Checking secure identity storage...")
         if os.path.exists("keys/identity.enc"):
             print(" -> Identity found. Reconstructing with Secret Sharing...")
             self.private_key, self.public_key = load_identity_with_shares(password)
 
             if self.private_key is None:
-                print("CRITICAL ERROR: Wrong password or corrupted key shares.")
+                print("CRITICAL ERROR: Incorrect password or corrupted key shares.")
                 sys.exit(1)
             else:
                 print(" -> Success! Private key reconstructed in memory.")
@@ -82,8 +80,9 @@ class PeerNode:
 
         self.pub_key_str = serialize_public_key(self.public_key)
 
-        key_material = b'PROJECT_DPS_CLUSTER_KEY_2025'
-        self.search_master_key = derive_search_key(key_material)
+        # Initialize SSE Search Key (Derived from the Cluster Key)
+        # This ensures all peers generate the same trapdoors for the same keywords.
+        self.search_master_key = derive_search_key(CLUSTER_SEARCH_KEY)
 
     # ==============================================================
     # SERVER-SIDE LOGIC
@@ -91,14 +90,13 @@ class PeerNode:
     
     def start_server(self):
         """
-        Start the TCP server that listens for incoming connections
-        from other peers.
+        Starts the TCP server to listen for incoming P2P connections.
         """
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             server.bind((self.host, self.port))
             server.listen()
-            print(f"[SERVIDOR] Peer {self.my_id} listening in {self.host}:{self.port}")
+            print(f"[SERVER] Peer {self.my_id} listening on {self.host}:{self.port}")
             
             while True:
                 conn, addr = server.accept()
@@ -109,12 +107,12 @@ class PeerNode:
 
     def handle_request(self, conn, addr):
         """
-        Handle an incoming TCP request from another peer.
-
-        The request is expected to be a JSON object with a 'type' field. Supported types:
-        - PING
-        - PUT
-        - SEARCH (placeholder for future work)
+        Dispatches incoming requests based on the message type.
+        
+        Supported Types:
+        - PUT: Store encrypted data.
+        - SEARCH: Perform a privacy-preserving keyword search.
+        - PING: Liveness check.
         """
         try:
             data = conn.recv(8192).decode('utf-8')
@@ -135,16 +133,15 @@ class PeerNode:
 
     def handle_put(self, request, conn):
         """
-        Handle an incoming PUT request.
-
-        Steps:
-        1. Verify the digital signature
-        2. If valid, store the encrypted data locally
-        3. Reply with status OK or DENIED
+        Processes a PUT request.
+        
+        Security Checks:
+        1. Verifies the Digital Signature using the sender's Public Key.
+        2. Stores the data if the signature is valid.
         """
         print(f"\n[RECEIVED] PUT from {request.get('sender_id', 'Unknown')}")
         
-        # Verify signature to ensure authenticity and integrity
+        # Verify Integrity and Authenticity
         valid = verify_signature(
             request['sender_pub_key'], 
             request['encrypted_data'], 
@@ -154,37 +151,37 @@ class PeerNode:
         if valid:
             doc_id = request['doc_id']
             sender = request.get("sender_id", "Unknown")
-            table = request["table"]  # NEW: table support
+            table = request["table"]
             key = request["key"]
             
-            # CORREÇÃO: Guardar 'encrypted_keys' (plural) em vez de singular
             storage_item = {
                 "sender_id": sender,
                 "table": table,
-                "key": key,  # store the user key
-                "doc_id": doc_id,  # internal doc ID
+                "key": key,
+                "doc_id": doc_id,
                 "encrypted_data": request['encrypted_data'],
-                "encrypted_keys": request['encrypted_keys'] # Dicionário {PeerID: Chave}
+                "encrypted_keys": request['encrypted_keys'] # Map: PeerID -> Encrypted Symmetric Key
             }
             
             self.db.put(doc_id, storage_item, table) 
             
-            # Store trapdoors for privacy-preserving search
+            # Index trapdoors for SSE (Privacy-Preserving Search)
+            # We index incoming data so we can answer search queries later.
             if 'trapdoors' in request:
                 for keyword, trapdoor in request['trapdoors'].items():
                     self.db.put_search_index(table, trapdoor, doc_id)
 
-            # If sender included a trapdoor for the user 'key', store it too
+            # Index the file key (filename) trapdoor as well
             if 'key_trapdoor' in request:
                 self.db.put_search_index(table, request['key_trapdoor'], doc_id)
             
+            # Check access status for logging
             if self.my_id in request['encrypted_keys']:
                 auth_status = "AUTHORIZED recipient"
             else:
-                auth_status = "NOT authorized (ciphertext only)"
+                auth_status = "NOT authorized (ciphertext storage only)"
 
-            print(f"VALID from {sender} | table='{table}', key='{key}', doc_id='{doc_id}' | {auth_status}")
-            
+            print(f"VALID from {sender} | table='{table}', key='{key}' | {auth_status}")
             conn.send(json.dumps({"status": "OK"}).encode())
         else:
             print(" -> INVALID SIGNATURE. Rejected.")
@@ -192,34 +189,34 @@ class PeerNode:
 
     def handle_search(self, request, conn):
         """
-        Handle an incoming SEARCH request from another peer.
+        Processes a SEARCH request.
         
-        Privacy-preserving search using SSE:
-        - The sender provides a trapdoor (not the keyword)
-        - The server matches trapdoors against the search index
-        - Results return doc_ids without revealing the keyword
+        SSE Mechanism:
+        - Receives a 'trapdoor' (hash), not the plaintext keyword.
+        - Checks the local Inverted Index for matches.
+        - Returns matching Document IDs.
         """
         print(f"\n[RECEIVED] SEARCH from {request.get('sender_id', 'Unknown')}")
         
         table_name = request.get('table')
         trapdoor = request.get('trapdoor')
-        mode = request.get('mode', 'docs')  # 'docs' (default) or 'tables'
+        mode = request.get('mode', 'docs')  # 'docs' or 'tables'
 
         if not trapdoor:
             conn.send(json.dumps({"status": "ERROR", "message": "Missing trapdoor"}).encode())
             return
 
+        # Mode: Search for Tables containing the key
         if mode == 'tables':
-            # Return the list of tables where this trapdoor appears
             tables = self.db.search_tables_by_trapdoor(trapdoor)
             response = {"status": "OK", "mode": "tables", "tables": tables, "count": len(tables)}
             print(f" -> Found {len(tables)} table(s) containing trapdoor")
             conn.send(json.dumps(response).encode())
             return
 
-        # Default behavior: search for documents inside a specific table
+        # Mode: Search for Documents inside a specific table
         if not table_name:
-            conn.send(json.dumps({"status": "ERROR", "message": "Missing table for document search"}).encode())
+            conn.send(json.dumps({"status": "ERROR", "message": "Missing table"}).encode())
             return
 
         matching_docs = self.db.search_by_trapdoor(table_name, trapdoor)
@@ -237,11 +234,7 @@ class PeerNode:
     # ==============================================================
 
     def register_discovery(self):
-        """
-        Register this peer with the discovery server.
-
-        Sends peer ID, listening port, and public key.
-        """
+        """Registers this peer with the Discovery Server."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((self.discovery_ip, self.discovery_port))
@@ -253,18 +246,13 @@ class PeerNode:
             }
             s.send(json.dumps(msg).encode())
             resp = json.loads(s.recv(1024).decode())
-            print(f"[DISCOVERY] Registo: {resp['status']}")
+            print(f"[DISCOVERY] Registration: {resp['status']}")
             s.close()
         except Exception as e:
-            print(f"[DISCOVERY ERROR] It was not possible to connect: {e}")
+            print(f"[DISCOVERY ERROR] Connection failed: {e}")
 
     def get_peers(self):
-        """
-        Request the list of currently active peers from the discovery server.
-
-        Returns:
-        - dictionary mapping peer_id -> (ip, port, public_key)
-        """
+        """Fetches the list of active peers from the Discovery Server."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((self.discovery_ip, self.discovery_port))
@@ -281,87 +269,86 @@ class PeerNode:
             s.close()
             return resp.get('peers', {})
         except Exception as e:
-            print(f"[ERRO GET_PEERS] {e}")
+            print(f"[GET_PEERS ERROR] {e}")
             return {}
 
     def broadcast_data(self, message_text, target_peer_ids, table_name, key, store_locally=False):
         """
-        Broadcast encrypted data (PUT) to all peers, storing it under a specific key (doc_id)
-        in the chosen table. Decryption access is granted only to specific receivers.
+        Encrypts and propagates data (PUT) to the network.
 
-        Parameters:
-        - message_text: plaintext value to send (v)
-        - target_peer_ids: list of peer IDs allowed to decrypt the data
-        - table_name: name of the table to store the key-value pair
-        - doc_id: key under which the value is stored (k)
+        Steps:
+        1. Encrypt data with a random Symmetric Key (AES).
+        2. Sign the ciphertext with RSA Private Key.
+        3. Encrypt the Symmetric Key for each recipient using their Public Keys.
+        4. Generate SSE Trapdoors for searchability.
+        5. Send payload to all peers.
         """
-
         all_peers = self.get_peers()
         valid_targets = [pid for pid in target_peer_ids if pid in all_peers]
         
         if not valid_targets:
-            print("[ERROR] No receivers found.")
+            print("[ERROR] No valid recipients found.")
             return
 
         doc_id = f"doc-{self.my_id}-{int(time.time())}"
-
         print(f"[BROADCAST] Sending '{key}' to: {valid_targets} in table '{table_name}'")
 
         try:
-            # 1. Generate symmetric key
+            # 1. Generate Symmetric Key
             file_key = generate_symmetric_key()
 
-            # 2. Encrypt message with symmetric key
+            # 2. Encrypt Data
             encrypted_bytes = encrypt_data(file_key, message_text)
             encrypted_data_str = encrypted_bytes.decode('utf-8')
 
-            # 3. Sign encrypted data
+            # 3. Sign Data
             signature = sign_data(self.private_key, encrypted_data_str)
 
-            # 4. Encrypt symmetric key for each authorized peer
+            # 4. Encrypt Symmetric Key for recipients (Digital Envelope)
             keys_map = {}
             for pid in valid_targets:
                 target_pub_key = all_peers[pid][2]
                 keys_map[pid] = encrypt_rsa(target_pub_key, file_key)
             
+            # If storing locally, encrypt the key for myself too
             if store_locally:
-                my_encrypted_key = encrypt_rsa(self.public_key, file_key)
+                my_encrypted_key = encrypt_rsa(self.pub_key_str, file_key)
                 keys_map[self.my_id] = my_encrypted_key
 
-            # 5. Create payload
+            # 5. Create Payload
             payload = {
                 "type": "PUT",
                 "sender_id": self.my_id,
-                "table": table_name,  # NEW: include table
-                "key": key,  # User provided key
+                "table": table_name,
+                "key": key,
                 "doc_id": doc_id,  
                 "encrypted_data": encrypted_data_str,
-                "encrypted_keys": keys_map, # Dicionário com chaves para cada destinatário
+                "encrypted_keys": keys_map,
                 "signature": signature,
                 "sender_pub_key": self.pub_key_str
             }
 
-            # 6. Build search index for keywords and collect trapdoors
+            # 6. Generate SSE Trapdoors
             keywords = message_text.split()
-            trapdoors = {}  # Map: keyword -> trapdoor
+            trapdoors = {} 
             for keyword in keywords:
+                # Generate robust trapdoor
                 trapdoor, _ = create_search_index(self.search_master_key, keyword, doc_id)
                 trapdoors[keyword] = trapdoor
 
                 if store_locally:
                     self.db.put_search_index(table_name, trapdoor, doc_id)
             
-            # Also create a trapdoor for the user 'key' so Search(k) can be privacy-preserving
+            # Generate trapdoor for the File Key (filename)
             key_trapdoor = generate_trapdoor(self.search_master_key, key)
-            # store locally
             if store_locally:
                 self.db.put_search_index(table_name, key_trapdoor, doc_id)
-            # 7. Add trapdoors to payload so receivers can index the message
+            
+            # Attach trapdoors to payload
             payload['trapdoors'] = trapdoors
-            # include the key trapdoor as a separate field
             payload['key_trapdoor'] = key_trapdoor
             
-            # 8. Send payload to all peers
+            # 7. Broadcast
             for peer_id, info in all_peers.items():
                 if peer_id == self.my_id: continue
                 threading.Thread(
@@ -369,6 +356,7 @@ class PeerNode:
                     args=(info[0], int(info[1]), payload, peer_id)
                 ).start()
 
+            # 8. Local Storage (if requested)
             if store_locally:
                 storage_item = {
                     "sender_id": self.my_id,
@@ -379,17 +367,15 @@ class PeerNode:
                     "encrypted_keys": keys_map 
                 }
                 self.db.put(doc_id, storage_item, table_name)
-                print(f"[LOCAL] Ficheiro '{key}' e índices guardados localmente.")
+                print(f"[LOCAL] File '{key}' and indexes saved locally.")
             else:
-                print(f"[LOCAL] Ficheiro enviado mas NÃO guardado (nem indexado) localmente.")
+                print(f"[LOCAL] File sent but NOT saved locally.")
                 
         except Exception as e:
             print(f"[BROADCAST ERROR] {e}")
 
     def _send_thread_worker(self, ip, port, payload, peer_id):
-        """
-        Worker thread that sends a PUT payload to a single peer.
-        """
+        """Helper thread to send data to a specific peer."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(3)
@@ -401,14 +387,7 @@ class PeerNode:
 
     def search_keyword(self, keyword, table_name):
         """
-        Search for documents containing a keyword in a specific table.
-        
-        This method uses SSE (Searchable Symmetric Encryption) to find
-        documents without decrypting them. Only the peer performing the
-        search needs access to the search_master_key.
-        
-        - param keyword: The keyword to search for
-        - param table_name: The table name to search in
+        Performs a Local SSE Search.
         """
         trapdoor = generate_trapdoor(self.search_master_key, keyword)
         matching_docs = self.db.search_by_trapdoor(table_name, trapdoor)
@@ -429,30 +408,18 @@ class PeerNode:
 
     def search_distributed(self, keyword, table_name):
         """
-        Perform a distributed search across all peers for documents containing a keyword.
-        
-        This method:
-        1. Generates a trapdoor from the keyword (the keyword itself is never sent)
-        2. Sends SEARCH requests to all available peers with the trapdoor
-        3. Aggregates results from all peers
-        
-        Returns: Dictionary mapping peer_id -> list of matching doc_ids
-        
-        - param keyword: The keyword to search for
-        - param table_name: The table name to search in
+        Performs a Distributed SSE Search across all active peers.
         """
         print(f"\n[DISTRIBUTED SEARCH] Searching '{keyword}' in table '{table_name}'")
         
-        # Generate trapdoor without revealing the keyword
         trapdoor = generate_trapdoor(self.search_master_key, keyword)
         
-        # First search locally
+        # 1. Local Search
         local_results = self.db.search_by_trapdoor(table_name, trapdoor)
         aggregated_results = {self.my_id: local_results}
-        
         print(f" -> Local search: {len(local_results)} document(s)")
         
-        # Search on remote peers
+        # 2. Remote Search
         all_peers = self.get_peers()
         search_request = {
             "type": "SEARCH",
@@ -462,8 +429,7 @@ class PeerNode:
         }
         
         for peer_id, info in all_peers.items():
-            if peer_id == self.my_id:
-                continue
+            if peer_id == self.my_id: continue
             
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -471,13 +437,12 @@ class PeerNode:
                 s.connect((info[0], int(info[1])))
                 s.send(json.dumps(search_request).encode())
                 
+                # Receive response (handle fragmentation)
                 response_data = b""
                 while True:
                     part = s.recv(4096)
-                    if not part:
-                        break
+                    if not part: break
                     response_data += part
-                
                 s.close()
                 
                 if response_data:
@@ -490,9 +455,9 @@ class PeerNode:
             except socket.timeout:
                 print(f" -> {peer_id}: timeout")
             except Exception as e:
-                print(f" -> {peer_id}: error ({str(e)[:30]})")
+                print(f" -> {peer_id}: error")
         
-        # Display aggregated results
+        # 3. Display Results
         total_results = sum(len(docs) for docs in aggregated_results.values())
         print(f"\n[RESULT] Total: {total_results} document(s) found across network")
         
@@ -500,7 +465,7 @@ class PeerNode:
             if doc_ids:
                 print(f"\nFrom {peer_id}:")
                 if peer_id == self.my_id:
-                    # Show local data details
+                    # Local: Show full details
                     table_data = self.db.get_table(table_name)
                     for doc_id in doc_ids:
                         if doc_id in table_data:
@@ -508,26 +473,25 @@ class PeerNode:
                             key = item.get('key', 'N/A')
                             print(f"  - Doc ID: {doc_id} | Key: {key}")
                 else:
-                    # Show remote data (doc_ids only, no decryption keys)
+                    # Remote: Show IDs (Content is encrypted/not retrieved yet)
                     for doc_id in doc_ids:
-                        print(f"  - Doc ID: {doc_id} (remote, encrypted)")
+                        print(f"  - Doc ID: {doc_id} (remote)")
         
         return aggregated_results
 
     def search_key_tables_distributed(self, key):
         """
-        Distributed search that returns the list of tables where `key` appears.
-        Uses SSE trapdoors so the keyword itself is never revealed to remote peers.
+        Distributed search to find which Tables contain a specific File Key.
         """
         print(f"\n[DISTRIBUTED KEY-TABLE SEARCH] Searching key '{key}' across network")
         trapdoor = generate_trapdoor(self.search_master_key, key)
 
-        # Local tables
+        # 1. Local Search
         local_tables = self.db.search_tables_by_trapdoor(trapdoor)
         aggregated = {self.my_id: local_tables}
         print(f" -> Local: {len(local_tables)} table(s)")
 
-        # Remote peers
+        # 2. Remote Search
         all_peers = self.get_peers()
         search_request = {
             "type": "SEARCH",
@@ -537,8 +501,7 @@ class PeerNode:
         }
 
         for peer_id, info in all_peers.items():
-            if peer_id == self.my_id:
-                continue
+            if peer_id == self.my_id: continue
 
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -549,10 +512,8 @@ class PeerNode:
                 response_data = b""
                 while True:
                     part = s.recv(4096)
-                    if not part:
-                        break
+                    if not part: break
                     response_data += part
-
                 s.close()
 
                 if response_data:
@@ -562,12 +523,10 @@ class PeerNode:
                         aggregated[peer_id] = tables
                         print(f" -> Remote {peer_id}: {len(tables)} table(s)")
 
-            except socket.timeout:
-                print(f" -> {peer_id}: timeout")
-            except Exception as e:
-                print(f" -> {peer_id}: error ({str(e)[:30]})")
+            except Exception:
+                print(f" -> {peer_id}: unresponsive")
 
-        # Summarize
+        # 3. Summarize
         total = sum(len(t) for t in aggregated.values())
         print(f"\n[RESULT] Total tables found across network: {total}")
         for pid, tables in aggregated.items():
@@ -583,12 +542,12 @@ class PeerNode:
 # ==============================================================
 
 def main():
-    discovery_ip = input("Insert Discovery Server's IP (Default: 127.0.0.1): ")
+    discovery_ip = input("Discovery Server IP (Default: 127.0.0.1): ")
     if not discovery_ip: discovery_ip = "127.0.0.1"
     discovery_port = 5000 
 
-    my_id = input("Insert peer's ID (ex: Alice): ")
-    my_port_input = input("Insert peer's port number (ex: 6001): ")
+    my_id = input("Peer ID (e.g., Alice): ")
+    my_port_input = input("Peer Port (e.g., 6001): ")
     my_port = int(my_port_input) if my_port_input else 6001
 
     password = input(f"Enter password for {my_id}'s secure vault: ")
@@ -607,29 +566,29 @@ def main():
         print("\n--- MENU P2P SECURE DB ---")
         print("1. List Peers")
         print("2. Send Data (Multi-Receiver)")
-        print("3. Exit")
-        print("4. See my local data")
-        print("5. Search keyword (Local SSE)")
-        print("6. Distributed Search (All Peers)")
-        print("7. Distributed Key->Tables Search (Privacy-preserving)")
+        print("3. View Local Data")
+        print("4. Search Keyword (Local SSE)")
+        print("5. Distributed Search (All Peers)")
+        print("6. Distributed Key->Tables Search")
+        print("7. Exit")
         choice = input("Choose: ")
         
         if choice == '1':
             peers = node.get_peers()
-            print("Peers Online:", list(peers.keys()))
+            print("Online Peers:", list(peers.keys()))
             
         elif choice == '2':
             peers = node.get_peers()
             if not peers:
-                print("No peer found.")
+                print("No peers found.")
                 continue
             
             print("Available peers:", list(peers.keys()))
-            targets_input = input("Recipient (separate with commas): ")
+            targets_input = input("Recipients (comma separated): ")
             target_list = [t.strip() for t in targets_input.split(',') if t.strip()]
             
             if not target_list:
-                print("Empty recipient list.")
+                print("Recipient list is empty.")
                 continue
 
             table_name = input("Table name: ").strip()
@@ -641,21 +600,16 @@ def main():
 
             node.broadcast_data(value, target_list, table_name=table_name, key=key, store_locally=store_locally)
                 
-        elif choice == '3':
-            print("Shutting down...")
-            sys.exit()
-
-        elif choice == '4':
+        elif choice == '3': # View Local Data
             try:
                 table = input("Table name: ").strip()
                 key = input("Key (k): ").strip()
 
-                table_data = node.db.get_table(table)  # get full table
+                table_data = node.db.get_table(table)
                 if not table_data:
                     print("Table not found or empty.")
                     continue
 
-                # Find the doc that matches the user-provided key
                 matched_doc = None
                 for doc_id, item in table_data.items():
                     if item.get('key') == key:
@@ -663,52 +617,50 @@ def main():
                         break
 
                 if not matched_doc:
-                    print("Not found.")
+                    print("Document not found.")
                     continue
 
-                # CORREÇÃO: Lógica de leitura para Multi-Recipient
                 doc_id, item = matched_doc
                 keys_map = item['encrypted_keys']
-                sender = item.get('sender_id', '?')
                 
                 if node.my_id in keys_map:
-                    # Sou um destinatário!
+                    # Decrypt content
                     my_enc_key = keys_map[node.my_id]
                     sym_key = decrypt_rsa(node.private_key, my_enc_key)
                     plaintext = decrypt_data(sym_key, item['encrypted_data'].encode('utf-8'))
                     print(f"Key: {key} | Doc ID: {doc_id} | Content: {plaintext}")
                 else:
-                    # Tenho o ficheiro mas não sou o destinatário
                     print(f"Key: {key} | Doc ID: {doc_id} | [ACCESS DENIED] (Encrypted file)")
                 
             except Exception as e:
-                print(f"ID: {doc_id} | Failed to read: {e}")
+                print(f"Error reading: {e}")
 
-        elif choice == '5':
+        elif choice == '4': # Search Local
             table_name = input("Table name: ").strip()
             keyword = input("Search keyword: ").strip()
-            
             if not table_name or not keyword:
                 print("Invalid input.")
                 continue
-            
             node.search_keyword(keyword, table_name)
 
-        elif choice == '6':
+        elif choice == '5': # Distributed Search
             table_name = input("Table name: ").strip()
             keyword = input("Search keyword: ").strip()
-            
             if not table_name or not keyword:
                 print("Invalid input.")
                 continue
-            
             node.search_distributed(keyword, table_name)
             
-        elif choice == '7':
+        elif choice == '6': # Distributed Tables Search
             key = input("Key (k) to search across tables: ").strip()
             if not key:
                 print("Invalid input.")
                 continue
             node.search_key_tables_distributed(key)
+
+        elif choice == '7': # Exit
+            print("Shutting down...")
+            sys.exit()
+
 if __name__ == "__main__":
     main()

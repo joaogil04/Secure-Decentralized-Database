@@ -1,15 +1,19 @@
 """
 discovery_server.py
 
+This file implements the Peer Discovery Service (Directory Service).
 
-This file implements a simple peer discovery service. The server's purpose is to:
-- keep track of active peers in the network;
-- allow peers to register themselves;
-- allow peers to discover other available peers;
-- remove peers that become unavailable.
+In a pure P2P network, peers might need a bootstrap mechanism to find each other.
+This server acts as a centralized repository of active peers, similar to a 
+DNS service or a Tracker in BitTorrent.
 
-The server acts similarly to a DNS service and is not involved in PUT or GET
-operations.
+It ensures:
+1. Registration: New peers announce their presence (IP, Port, Public Key).
+2. Discovery: Peers can request a list of currently active neighbors.
+3. Availability (Failure Detection): A background thread performs active 
+   health checks (heartbeats) to remove offline peers.
+
+NOTE: This server NEVER handles data storage (PUT/GET). It only manages metadata.
 """
 
 import socket
@@ -25,45 +29,46 @@ HOST = '0.0.0.0'
 PORT = 5000  # TCP port used by the discovery service
 
 # Dictionary holding currently active peers
-active_peers = {} # Format: {"peer_id": ("ip", port, "pub_key")}
+# Structure: { "peer_id": ("ip", "port", "public_key_pem") }
+active_peers = {} 
 
 # ==============================================================
-# AVAILABILITY MONITORING (Slide 47 - Availability)
+# AVAILABILITY MONITORING (Failure Detection)
 # ==============================================================
 
 def monitor_peers():
     """
-    Periodically checks whether registered peers are still reachable.
-
-    Every 10S, the server tries to open a TCP connection to each peer.
-    If a peer does not respond, it is assumed to be offline and removed from
-    the active peers list.
+    Implements an Active Failure Detection mechanism (Heartbeat).
+    
+    Periodically (every 10s), the server attempts to establish a TCP connection 
+    to every registered peer. If a peer is unreachable, it is considered crashed 
+    or offline and is removed from the directory to maintain consistency.
     """
-
-    print("[MONITOR] Heartbeat system started...")
+    print("[MONITOR] Heartbeat failure detection system started...")
+    
     while True:
         time.sleep(10)
-        peers_to_check = list(active_peers.items())  # Create a copy of the dictionary --> avoid issues of runtime modifications
+        # Create a copy of items to avoid RuntimeError during dictionary modification
+        peers_to_check = list(active_peers.items())  
         
         for peer_id, info in peers_to_check:
-            # CORREÇÃO AQUI: Agora a lista tem 3 coisas (IP, Porta, Key)
-            # Vamos buscar só o IP e Porta para o Ping
             ip = info[0]
             port = info[1]
+            # info[2] is the Public Key, not needed for ping
             
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
-                result = s.connect_ex((ip, int(port)))  # Try to connect to the peer
+                s.settimeout(2) # Short timeout for quick detection
+                result = s.connect_ex((ip, int(port)))
                 
                 if result == 0:
-                    # Envia PING para não ser confundido com dados
+                    # Send a PING packet so the peer knows it's just a check
                     s.send(json.dumps({"type": "PING"}).encode())
                     s.close()
                 else:
                     raise Exception("Port unreachable")
             except:
-                print(f"[REMOVED] Peer {peer_id} ({ip}:{port}) is offline.")
+                print(f"[REMOVED] Peer {peer_id} ({ip}:{port}) is unreachable/offline.")
                 if peer_id in active_peers:
                     del active_peers[peer_id]
 
@@ -73,45 +78,47 @@ def monitor_peers():
 
 def handle_client(conn, addr):
     """
-    Handles incoming connections from peers.
+    Handles incoming TCP connections from peers.
 
-    Supported request types:
-    - REGISTER: registers a new peer in the network
-    - GET_PEERS: returns the list of active peers (excluding the requester)
+    Supported protocol messages:
+    - REGISTER: Peer announces its ID, Port, and Public Key.
+    - GET_PEERS: Peer requests the list of other active nodes.
     """
-
     print(f"[NEW CONNECTION] {addr} connected.")
     try:
-        msg = conn.recv(4096).decode('utf-8') # Aumentei o buffer porque a Public Key é grande
+        # Buffer size 4096 to accommodate large RSA Public Keys
+        msg = conn.recv(4096).decode('utf-8') 
         if not msg: return
+        
         request = json.loads(msg)
-
         response = {}
         
         if request['type'] == 'REGISTER':
-            # Register a new peer
+            # 1. Extract details
             peer_id = request['peer_id']
             port = request['port']
-            # CORREÇÃO AQUI: Ler a Public Key do pedido
-            pub_key = request.get('pub_key', 'CHAVE_NAO_ENVIADA')
+            # Critical: Store Public Key for Hybrid Encryption distribution
+            pub_key = request.get('pub_key', 'KEY_NOT_SENT')
             
-            # CORREÇÃO AQUI: Guardar IP, Porta E Chave Pública (3 elementos)
+            # 2. Update Directory
+            # Storing tuple: (IP Address, Port, RSA Public Key)
             active_peers[peer_id] = (addr[0], port, pub_key)
             
-            print(f"[REGISTO] Peer {peer_id} in {addr[0]}:{port}")
-            response = {"status": "SUCCESS", "message": "Registered"}
+            print(f"[REGISTERED] Peer '{peer_id}' at {addr[0]}:{port}")
+            response = {"status": "SUCCESS", "message": "Successfully registered"}
 
         elif request['type'] == 'GET_PEERS':
-            # Return all peers except the requester
+            # Return list of peers excluding the requester itself
             requester_id = request.get('peer_id')
             others = {k: v for k, v in active_peers.items() if k != requester_id}
+            
             response = {"status": "SUCCESS", "peers": others}
 
-        # Send response back to peer
+        # Send JSON response
         conn.send(json.dumps(response).encode('utf-8'))
     
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] Handling client: {e}")
     finally:
         conn.close()
 
@@ -121,21 +128,18 @@ def handle_client(conn, addr):
 
 def start():
     """
-    Starts the discovery server and listens for incoming connections.
-
-    A background thread is launched to monitor peer availability, while
-    the main thread accepts new TCP connections.
+    Main entry point. Starts the TCP server and the background monitor thread.
     """
-
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen()
-    print(f"[DISCOVERY] Listening on {HOST}:{PORT}")
+    print(f"[DISCOVERY] Directory Service running on {HOST}:{PORT}")
 
-    # Start availability monitor in the background
+    # Start the Heartbeat monitor in a background thread (daemon)
     monitor_thread = threading.Thread(target=monitor_peers, daemon=True)
     monitor_thread.start()
 
+    # Main loop for accepting connections
     while True:
         conn, addr = server.accept()
         thread = threading.Thread(target=handle_client, args=(conn, addr))

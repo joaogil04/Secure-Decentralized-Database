@@ -1,14 +1,15 @@
 """
 database.py
 
+This file implements the local storage layer for each peer.
 
-This file implements a very simple local storage layer for each peer.
+Each peer maintains its own local database using a persistent JSON file. 
+The database stores:
+1. Encrypted Data: Key-value pairs organized by tables.
+2. Search Index: An Inverted Index structure to support Searchable Symmetric Encryption (SSE).
 
-Each peer keeps its own local database in a JSON file on disk. The database stores 
-encrypted data (in a key-value format) received from the network, as well as data created locally.
-
-There is no shared storage and no remote access to this database: all read
-(GET) operations are local.
+There is no shared storage and no remote access to this database file directly; 
+all network operations interact with the PeerNode logic, which then calls this class.
 """
 
 import json
@@ -19,22 +20,23 @@ class LocalDatabase:
     Represents a local key-value database stored in a JSON file.
 
     Each peer has its own instance of this class and its own storage file.
-    The database is persistent across executions and automatically saved
-    after each update.
+    The database is persistent across executions (Data at Rest) and automatically 
+    saved after each update to ensure durability.
     """
+
     def __init__(self, peer_id, folder="peer_data"):
         """
         Initializes the local database for a specific peer.
 
-        - param peer_id: Identifier of the peer (used to name the storage file)
-        - param folder: Directory where database files are stored
-
-        NOTA: Separa dados de código criando uma pasta 'peer_data'.
+        - param peer_id: Identifier of the peer (used to name the storage file).
+        - param folder: Directory where database files are stored.
+        
+        NOTE: Separates data from source code by creating a dedicated 'peer_data' folder.
         """
         self.folder = folder
-        self.filename = f"storage_{peer_id}.json"  # File name is unique per peer
+        self.filename = f"storage_{peer_id}.json"  # Unique filename per peer
         self.filepath = os.path.join(self.folder, self.filename)
-        self.data = {}  # { "TableName": { key: value, ... } }
+        self.data = {}  # Structure: { "TableName": { doc_id: value, ... }, "search_index": ... }
         
         # Ensure storage directory exists and load existing data
         self._ensure_folder_exists()
@@ -43,7 +45,6 @@ class LocalDatabase:
     def _ensure_folder_exists(self):
         """
         Creates the storage directory if it does not already exist.
-        This keeps database files separate from source code.
         """
         if not os.path.exists(self.folder):
             try:
@@ -55,16 +56,16 @@ class LocalDatabase:
         """
         Loads the database contents from disk into memory.
 
-        If the file does not exist or is corrupted, an empty database
-        is initialized.
+        If the file does not exist or is corrupted (JSONDecodeError), 
+        an empty database is initialized to prevent crashes.
         """
-
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, 'r') as f:
                     self.data = json.load(f)
             except json.JSONDecodeError:
-                # Corrupted or invalid JSON
+                # Handle corrupted JSON gracefully
+                print(f"[DB] Warning: Corrupted database file found. Starting with empty DB.")
                 self.data = {}
         else:
             # No previous data found
@@ -73,9 +74,10 @@ class LocalDatabase:
     def save(self):
         """
         Persists the current in-memory database to disk.
-        The file is overwritten on each save for consistency.
+        
+        The file is overwritten on each save to ensure consistency between 
+        memory and disk states.
         """
-
         try:
             with open(self.filepath, 'w') as f:
                 json.dump(self.data, f, indent=4)
@@ -84,14 +86,13 @@ class LocalDatabase:
 
     def put(self, doc_id, value, table):
         """
-        Store a document in a given table using its internal doc_id.
+        Stores a document in a given table using its internal doc_id.
         Creates the table if it doesn't exist.
 
-        - doc_id: Internal unique document ID
-        - value: Dictionary containing at least 'key', 'encrypted_data', 'encrypted_keys', etc.
-        - table: Table name
+        - param doc_id: Internal unique document ID.
+        - param value: Dictionary containing the encrypted payload and metadata.
+        - param table: Name of the table (category).
         """
-
         if table not in self.data:
             self.data[table] = {}
         
@@ -100,7 +101,8 @@ class LocalDatabase:
     
     def get_table(self, table):
         """
-        Return the whole table as a dictionary.
+        Retrieves an entire table as a dictionary.
+        Returns an empty dict if the table does not exist.
         """
         return self.data.get(table, {})
     
@@ -110,15 +112,15 @@ class LocalDatabase:
 
     def put_search_index(self, table, trapdoor, doc_id):
         """
-        Store a search index entry linking a trapdoor to a document.
-        Allows querying which documents contain a keyword.
+        Updates the Inverted Index for SSE.
         
-        The search index is stored separately from encrypted data to enable
-        fast keyword searches without decryption.
+        This method links a 'trapdoor' (deterministic hash of a keyword) to a document ID.
+        This structure allows efficient lookups (O(1) dictionary access) to find which 
+        documents contain a specific keyword without scanning the entire database.
         
-        - param table: Table name
-        - param trapdoor: The trapdoor for the keyword (base64 string)
-        - param doc_id: The document ID that contains this keyword
+        - param table: Table name.
+        - param trapdoor: The secure search token (base64 string).
+        - param doc_id: The document ID that contains the keyword.
         """
         if "search_index" not in self.data:
             self.data["search_index"] = {}
@@ -129,6 +131,7 @@ class LocalDatabase:
         if trapdoor not in self.data["search_index"][table]:
             self.data["search_index"][table][trapdoor] = []
         
+        # Avoid duplicates in the index
         if doc_id not in self.data["search_index"][table][trapdoor]:
             self.data["search_index"][table][trapdoor].append(doc_id)
         
@@ -136,15 +139,14 @@ class LocalDatabase:
 
     def search_by_trapdoor(self, table, trapdoor):
         """
-        Search for all documents matching a trapdoor in a table.
+        Searches for all documents matching a trapdoor within a specific table.
         
-        This function performs privacy-preserving search by matching the
-        trapdoor (deterministic keyword hash) against the search index.
-        The server never learns the actual keyword, only the trapdoor.
+        This utilizes the Inverted Index to perform a privacy-preserving search.
+        The database never sees the plaintext keyword, only the trapdoor.
         
-        - param table: Table name to search in
-        - param trapdoor: The search trapdoor (base64 string)
-        - return: List of matching document IDs, or empty list if none found
+        - param table: Table name to search in.
+        - param trapdoor: The search trapdoor.
+        - return: List of matching document IDs.
         """
         if "search_index" not in self.data:
             return []
@@ -156,15 +158,18 @@ class LocalDatabase:
 
     def search_by_key(self, key):
         """
-        Search for all tables where a specific user key appears.
+        Searches for all tables where a specific user-defined 'key' appears.
         
-        - param key: The user-provided key to search for
-        - return: List of table names where the key appears
+        This performs a metadata search (not content search) across all tables,
+        skipping the internal 'search_index' table.
+        
+        - param key: The user-provided key (e.g., filename) to search for.
+        - return: List of table names where the key exists.
         """
         tables_with_key = []
         
         for table_name, table_data in self.data.items():
-            # Skip search_index table
+            # Skip the reserved SSE index table
             if table_name == "search_index":
                 continue
             
@@ -179,7 +184,13 @@ class LocalDatabase:
     
     def search_tables_by_trapdoor(self, trapdoor):
         """
-        Retorna uma lista de nomes de tabelas onde este trapdoor aparece.
+        Identifies which tables contain a specific trapdoor.
+        
+        This allows for distributed searching across multiple tables without 
+        knowing the table name beforehand.
+        
+        - param trapdoor: The search token.
+        - return: List of table names containing the trapdoor.
         """
         found_tables = []
         if "search_index" not in self.data:
@@ -187,7 +198,7 @@ class LocalDatabase:
 
         search_index = self.data["search_index"]
         
-        # Iterar sobre todas as tabelas no índice
+        # Iterate over all tables in the index to find the trapdoor
         for table_name, traps in search_index.items():
             if trapdoor in traps:
                 found_tables.append(table_name)
